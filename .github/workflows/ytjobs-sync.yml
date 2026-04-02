@@ -1,0 +1,38 @@
+name: YTJobs to Monday Sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run sync
+        env:
+          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
+          MONDAY_BOARD_ID: ${{ secrets.MONDAY_BOARD_ID }}
+          MONDAY_GROUP_AVAILABLE: ${{ secrets.MONDAY_GROUP_AVAILABLE }}
+          MONDAY_GROUP_UNAVAILABLE: ${{ secrets.MONDAY_GROUP_UNAVAILABLE }}
+          MAX_PAGES: ${{ secrets.MAX_PAGES }}
+          HEADLESS: 'true'
+          DRY_RUN: 'false'
+          INCREMENTAL_MODE: 'true'
+          STOP_AFTER_KNOWN_PAGES: '2'
+          INCLUDE_UNAVAILABLE: 'true'
+        run: python sync_ytjobs_to_monday.py
