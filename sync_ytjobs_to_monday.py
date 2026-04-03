@@ -15,7 +15,8 @@ SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
 # =========================
 # HARD CODED MONDAY CONFIG
 # =========================
-MONDAY_API_TOKEN = "PASTE_YOUR_MONDAY_API_TOKEN_HERE"
+import os
+MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "")
 MONDAY_BOARD_ID = 18406893281
 
 # Replace these if your real group IDs are different
