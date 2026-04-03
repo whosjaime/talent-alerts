@@ -8,6 +8,7 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,15 +25,8 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run sync
-        env:
-          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
-          MONDAY_BOARD_ID: ${{ secrets.MONDAY_BOARD_ID }}
-          MONDAY_GROUP_AVAILABLE: ${{ secrets.MONDAY_GROUP_AVAILABLE }}
-          MONDAY_GROUP_UNAVAILABLE: ${{ secrets.MONDAY_GROUP_UNAVAILABLE }}
-          MAX_PAGES: ${{ secrets.MAX_PAGES }}
-          HEADLESS: 'true'
-          DRY_RUN: 'false'
-          INCREMENTAL_MODE: 'true'
-          STOP_AFTER_KNOWN_PAGES: '2'
-          INCLUDE_UNAVAILABLE: 'true'
-        run: python sync_ytjobs_to_monday.py
+        run: |
+          python sync_ytjobs_to_monday.py \
+            --headless \
+            --incremental \
+            --stop-after-known-pages 2
