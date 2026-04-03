@@ -14,15 +14,20 @@ from playwright.async_api import async_playwright, Page
 YTJOBS_BASE = "https://ytjobs.co"
 SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
 
-# =========================
-# CONFIG
-# =========================
-
 MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "")
-
 MONDAY_BOARD_ID = 18406893281
-MONDAY_GROUP_AVAILABLE = "topics"
-MONDAY_GROUP_UNAVAILABLE = "group_mm20bark"
+
+ROLE_TO_GROUP_ID = {
+    "Channel Manager": "topics",
+    "Strategist": "group_mm20bark",
+    "Producer": "group_mm22zy6t",
+    "Creative Director": "group_mm22x74p",
+    "Editor": "group_mm22v92w",
+    "Scriptwriter": "group_mm22hc00",
+    "Thumbnail Designer": "group_mm22jqd",
+    "Animator": "group_mm22agrt",
+}
+DEFAULT_GROUP_ID = "group_mm20bark"
 
 MONDAY_COLUMNS = {
     "linkedin": "text_mm20d7rp",
@@ -33,6 +38,7 @@ MONDAY_COLUMNS = {
     "open_for_work": "boolean_mm20xkyn",
     "creators_worked_with": "dropdown_mm20xxmt",
     "views": "numeric_mm20rjas",
+    "job_role": "dropdown_mm22xt4g",
 }
 
 VALID_CREATOR_LABELS = {
@@ -40,6 +46,74 @@ VALID_CREATOR_LABELS = {
     "Thumbnail Designers",
     "Animators",
     "Scriptwriters",
+}
+
+VALID_JOB_ROLE_LABELS = {
+    "Animator",
+    "Channel Manager",
+    "Content Creator",
+    "Creative Director",
+    "Developer",
+    "Engineer",
+    "Graphic Designer",
+    "Motion Designer",
+    "Operations Manager",
+    "Producer",
+    "Researcher",
+    "Scriptwriter",
+    "Short-Form Editor",
+    "Long-Form Editor",
+    "Social Media Manager",
+    "Community Manager",
+    "Podcast Editor",
+    "Strategist",
+    "Thumbnail Designer",
+    "Automation Specialist",
+    "Other",
+    "Lead Editor",
+    "Personal Assistant",
+    "Assistant Director",
+    "Brand Manager",
+}
+
+ROLE_ALIASES = {
+    "video editor": "Editor",
+    "editor": "Editor",
+    "lead editor": "Lead Editor",
+    "short form editor": "Short-Form Editor",
+    "short-form editor": "Short-Form Editor",
+    "long form editor": "Long-Form Editor",
+    "long-form editor": "Long-Form Editor",
+    "podcast editor": "Podcast Editor",
+    "thumbnail designer": "Thumbnail Designer",
+    "animator": "Animator",
+    "scriptwriter": "Scriptwriter",
+    "script writer": "Scriptwriter",
+    "producer": "Producer",
+    "creative director": "Creative Director",
+    "channel manager": "Channel Manager",
+    "strategist": "Strategist",
+    "content strategist": "Strategist",
+    "social media manager": "Social Media Manager",
+    "community manager": "Community Manager",
+    "operations manager": "Operations Manager",
+    "motion designer": "Motion Designer",
+    "graphic designer": "Graphic Designer",
+    "content creator": "Content Creator",
+    "developer": "Developer",
+    "engineer": "Engineer",
+    "researcher": "Researcher",
+    "automation specialist": "Automation Specialist",
+    "personal assistant": "Personal Assistant",
+    "assistant director": "Assistant Director",
+    "brand manager": "Brand Manager",
+}
+
+GROUP_ROLE_NORMALIZATION = {
+    "Lead Editor": "Editor",
+    "Short-Form Editor": "Editor",
+    "Long-Form Editor": "Editor",
+    "Podcast Editor": "Editor",
 }
 
 
@@ -54,6 +128,7 @@ class TalentRecord:
     creators_worked_with: list[str] | None = None
     views: float | None = None
     priority: str | None = None
+    job_role: str | None = None
 
 
 def _to_absolute(url: str) -> str:
@@ -94,26 +169,6 @@ def _walk(obj: Any):
             yield from _walk(item)
 
 
-def _normalize_priority(rec: TalentRecord) -> str:
-    score = 0
-    if rec.email:
-        score += 1
-    if rec.linkedin:
-        score += 1
-    if rec.open_for_work is True:
-        score += 1
-    if rec.years_of_experience is not None and rec.years_of_experience >= 5:
-        score += 1
-
-    if score >= 4:
-        return "Critical ⚠️️"
-    if score == 3:
-        return "High"
-    if score == 2:
-        return "Medium"
-    return "Low"
-
-
 def _clean_creators(creators: list[str] | None) -> list[str] | None:
     if not creators:
         return None
@@ -136,14 +191,13 @@ def _detect_open_for_work_from_text(text: str) -> bool | None:
         "unavailable",
         "not open for work",
         "closed to work",
-        "not hiring",
     ]
     available_signals = [
+        "open to work",
         "open for work",
         "hire me",
         "available for work",
         "available now",
-        "available",
     ]
 
     for signal in unavailable_signals:
@@ -155,6 +209,69 @@ def _detect_open_for_work_from_text(text: str) -> bool | None:
             return True
 
     return None
+
+
+def _normalize_role(raw_role: str | None) -> str | None:
+    if not raw_role:
+        return None
+
+    role = re.sub(r"\s+", " ", raw_role.strip().lower())
+    if role in ROLE_ALIASES:
+        return ROLE_ALIASES[role]
+
+    for alias, canonical in ROLE_ALIASES.items():
+        if alias in role:
+            return canonical
+
+    title_case = " ".join(word.capitalize() for word in role.split())
+    if title_case in VALID_JOB_ROLE_LABELS:
+        return title_case
+
+    return None
+
+
+def _detect_job_role_from_text(text: str) -> str | None:
+    if not text:
+        return None
+
+    lowered = text.lower()
+    ordered_aliases = sorted(ROLE_ALIASES.items(), key=lambda x: len(x[0]), reverse=True)
+
+    for alias, canonical in ordered_aliases:
+        if alias in lowered:
+            return canonical
+
+    return None
+
+
+def _group_for_role(job_role: str | None) -> str:
+    if not job_role:
+        return DEFAULT_GROUP_ID
+    normalized_for_group = GROUP_ROLE_NORMALIZATION.get(job_role, job_role)
+    return ROLE_TO_GROUP_ID.get(normalized_for_group, DEFAULT_GROUP_ID)
+
+
+def _normalize_priority(rec: TalentRecord) -> str:
+    if rec.open_for_work is True:
+        return "Critical ⚠️️"
+
+    score = 0
+    if rec.email:
+        score += 1
+    if rec.linkedin:
+        score += 1
+    if rec.years_of_experience is not None and rec.years_of_experience >= 5:
+        score += 1
+    if rec.views is not None and rec.views >= 100000:
+        score += 1
+
+    if score >= 4:
+        return "Critical ⚠️️"
+    if score == 3:
+        return "High"
+    if score == 2:
+        return "Medium"
+    return "Low"
 
 
 def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
@@ -180,45 +297,44 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
     profile = str(d.get(profile_key) or "") if profile_key else ""
 
     linkedin = ""
-    for k, v in d.items():
-        if "linkedin" in k.lower() and isinstance(v, str):
-            linkedin = v.strip()
-            break
-
     email = ""
-    for k, v in d.items():
-        if "email" in k.lower() and isinstance(v, str):
-            email = v.strip()
-            break
-
     years = None
-    for k, v in d.items():
-        lk = k.lower()
-        if "year" in lk and "exp" in lk:
-            years = _extract_num(str(v))
-            break
-
     open_for_work = None
+    views = None
+    creators = None
+    raw_role = None
+
     for k, v in d.items():
         lk = k.lower()
-        if "open" in lk and "work" in lk and isinstance(v, bool):
+
+        if not linkedin and "linkedin" in lk and isinstance(v, str):
+            linkedin = v.strip()
+
+        if not email and "email" in lk and isinstance(v, str):
+            email = v.strip()
+
+        if years is None and "year" in lk and "exp" in lk:
+            years = _extract_num(str(v))
+
+        if open_for_work is None and "open" in lk and "work" in lk and isinstance(v, bool):
             open_for_work = v
-            break
+
+        if views is None and "view" in lk:
+            views = _extract_num(str(v))
+
+        if creators is None and "creator" in lk and isinstance(v, list):
+            creators = [str(x).strip() for x in v if x]
+
+        if raw_role is None and any(token in lk for token in ["role", "title", "position", "job"]):
+            if isinstance(v, str) and v.strip():
+                raw_role = v.strip()
 
     if open_for_work is None:
         open_for_work = _detect_open_for_work_from_text(json.dumps(d, ensure_ascii=False))
 
-    views = None
-    for k, v in d.items():
-        if "view" in k.lower():
-            views = _extract_num(str(v))
-            break
-
-    creators = None
-    for k, v in d.items():
-        if "creator" in k.lower() and isinstance(v, list):
-            creators = [str(x).strip() for x in v if x]
-            break
+    job_role = _normalize_role(raw_role)
+    if job_role is None:
+        job_role = _detect_job_role_from_text(json.dumps(d, ensure_ascii=False))
 
     rec = TalentRecord(
         name=name,
@@ -229,7 +345,102 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
         open_for_work=open_for_work,
         creators_worked_with=_clean_creators(creators),
         views=views,
+        job_role=job_role or "Other",
     )
+    rec.priority = _normalize_priority(rec)
+    return rec
+
+
+def _extract_views_from_profile_text(text: str) -> float | None:
+    patterns = [
+        r"(\d+(?:\.\d+)?)\s*([kmb])?\s+views",
+        r"views\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([kmb])?",
+    ]
+    lowered = text.lower()
+    for pattern in patterns:
+        m = re.search(pattern, lowered, re.I)
+        if m:
+            raw = f"{m.group(1)}{m.group(2) or ''}"
+            return _extract_num(raw)
+    return None
+
+
+def _extract_role_from_profile_text(text: str) -> str | None:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in lines[:12]:
+        role = _normalize_role(line)
+        if role:
+            return role
+    return _detect_job_role_from_text(text)
+
+
+def _extract_creators_from_profile_text(text: str) -> list[str] | None:
+    lowered = text.lower()
+    found = []
+
+    keyword_map = {
+        "editor": "Editors",
+        "editors": "Editors",
+        "thumbnail designer": "Thumbnail Designers",
+        "thumbnail designers": "Thumbnail Designers",
+        "animator": "Animators",
+        "animators": "Animators",
+        "scriptwriter": "Scriptwriters",
+        "scriptwriters": "Scriptwriters",
+    }
+
+    for key, label in keyword_map.items():
+        if key in lowered and label not in found:
+            found.append(label)
+
+    return found or None
+
+
+async def _enrich_profile(page: Page, rec: TalentRecord) -> TalentRecord:
+    if not rec.ytjobs_profile_link:
+        return rec
+
+    try:
+        await page.goto(rec.ytjobs_profile_link, wait_until="domcontentloaded", timeout=90000)
+        await page.wait_for_timeout(2500)
+    except Exception:
+        return rec
+
+    body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+    body_text = body_text or ""
+
+    if not rec.job_role or rec.job_role == "Other":
+        detected_role = _extract_role_from_profile_text(body_text)
+        if detected_role:
+            rec.job_role = detected_role
+
+    profile_views = _extract_views_from_profile_text(body_text)
+    if profile_views is not None:
+        rec.views = profile_views
+
+    if rec.open_for_work is None:
+        rec.open_for_work = _detect_open_for_work_from_text(body_text)
+
+    if not rec.creators_worked_with:
+        creators = _extract_creators_from_profile_text(body_text)
+        if creators:
+            rec.creators_worked_with = _clean_creators(creators)
+
+    if rec.years_of_experience is None:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*years", body_text.lower())
+        if m:
+            rec.years_of_experience = _extract_num(m.group(1))
+
+    if not rec.linkedin:
+        m = re.search(r"https?://(?:www\.)?linkedin\.com/[^\s]+", body_text, re.I)
+        if m:
+            rec.linkedin = m.group(0)
+
+    if not rec.email:
+        m = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", body_text, re.I)
+        if m:
+            rec.email = m.group(0)
+
     rec.priority = _normalize_priority(rec)
     return rec
 
@@ -253,8 +464,8 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
 
     page.on("response", on_response)
 
-    print(f"Scraping page {page_no}: {url}")
-    await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+    print(f"Scraping directory page {page_no}: {url}")
+    await page.goto(url, wait_until="domcontentloaded", timeout=90000)
     await page.wait_for_timeout(4000)
 
     if not candidates:
@@ -284,7 +495,7 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
         )
 
         for row in raw:
-            text = row.get("text", "") or ""
+            text = (row.get("text", "") or "").strip()
             href = _to_absolute(row.get("href", ""))
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             if not lines:
@@ -310,9 +521,11 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
                 email=email_match.group(0) if email_match else "",
                 years_of_experience=_extract_num(text) if "year" in text.lower() else None,
                 open_for_work=_detect_open_for_work_from_text(availability_blob),
-                views=_extract_num(text) if "view" in text.lower() else None,
-                creators_worked_with=None,
+                views=_extract_views_from_profile_text(text),
+                creators_worked_with=_extract_creators_from_profile_text(text),
+                job_role=_extract_role_from_profile_text(text) or "Other",
             )
+            rec.creators_worked_with = _clean_creators(rec.creators_worked_with)
             rec.priority = _normalize_priority(rec)
             candidates.append(rec)
 
@@ -324,15 +537,7 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
 
     page.remove_listener("response", on_response)
     page_records = list(unique.values())
-    available_count = sum(1 for r in page_records if r.open_for_work is True)
-    unavailable_count = sum(1 for r in page_records if r.open_for_work is False)
-    unknown_count = sum(1 for r in page_records if r.open_for_work is None)
-
-    print(f"Page {page_no} records found: {len(page_records)}")
-    print(
-        f"Page {page_no} availability breakdown -> "
-        f"available: {available_count}, unavailable: {unavailable_count}, unknown: {unknown_count}"
-    )
+    print(f"Directory page {page_no} records found: {len(page_records)}")
     return page_records
 
 
@@ -375,14 +580,12 @@ class MondayClient:
         while True:
             data = self._post(query, {"board_id": board_id, "cursor": cursor})
             page = data["boards"][0]["items_page"]
-
             for item in page["items"]:
                 if not item["column_values"]:
                     continue
                 val = item["column_values"][0].get("text")
                 if val:
                     results.add(val.strip())
-
             cursor = page.get("cursor")
             if not cursor:
                 break
@@ -430,6 +633,9 @@ def build_column_values(rec: TalentRecord, col: dict[str, str]) -> dict[str, Any
     if rec.priority:
         vals[col["priority"]] = {"label": rec.priority}
 
+    if rec.job_role:
+        vals[col["job_role"]] = {"labels": [rec.job_role]}
+
     return vals
 
 
@@ -437,16 +643,24 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
         ctx = await browser.new_context()
-        page = await ctx.new_page()
+        directory_page = await ctx.new_page()
+        profile_page = await ctx.new_page()
 
         all_records: list[TalentRecord] = []
 
         for page_no in range(1, max_pages + 1):
-            records = await _scrape_page(page, page_no)
+            records = await _scrape_page(directory_page, page_no)
             if not records:
                 print(f"No records found on page {page_no}; stopping scrape.")
                 break
-            all_records.extend(records)
+
+            enriched_records = []
+            for idx, rec in enumerate(records, start=1):
+                print(f"  Enriching profile {idx}/{len(records)}: {rec.name}")
+                enriched = await _enrich_profile(profile_page, rec)
+                enriched_records.append(enriched)
+
+            all_records.extend(enriched_records)
 
         await browser.close()
 
@@ -464,7 +678,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-pages", type=int, default=1000)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--include-unavailable", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -474,8 +687,6 @@ def main() -> None:
     token = MONDAY_API_TOKEN
     board_id = MONDAY_BOARD_ID
     columns = MONDAY_COLUMNS
-    group_available = MONDAY_GROUP_AVAILABLE
-    group_unavailable = MONDAY_GROUP_UNAVAILABLE
 
     if not token and not args.dry_run:
         raise RuntimeError("MONDAY_API_TOKEN is required unless --dry-run is enabled")
@@ -491,15 +702,6 @@ def main() -> None:
     records = asyncio.run(scrape(args.max_pages, args.headless))
     print(f"Total scraped records: {len(records)}")
 
-    available_total = sum(1 for r in records if r.open_for_work is True)
-    unavailable_total = sum(1 for r in records if r.open_for_work is False)
-    unknown_total = sum(1 for r in records if r.open_for_work is None)
-
-    print(
-        f"Availability totals -> available: {available_total}, "
-        f"unavailable: {unavailable_total}, unknown: {unknown_total}"
-    )
-
     if args.dry_run:
         for rec in records[:25]:
             print(json.dumps(asdict(rec), ensure_ascii=False))
@@ -511,7 +713,6 @@ def main() -> None:
 
     created = 0
     skipped_existing = 0
-    skipped_unavailable = 0
     failed = 0
 
     for idx, rec in enumerate(records, start=1):
@@ -523,20 +724,17 @@ def main() -> None:
             skipped_existing += 1
             continue
 
-        if not args.include_unavailable and rec.open_for_work is not True:
-            skipped_unavailable += 1
-            continue
-
-        group = group_available if rec.open_for_work is True else group_unavailable
+        group_id = _group_for_role(rec.job_role)
         values = build_column_values(rec, columns)
 
         print(
-            f"[{idx}] Creating: {rec.name} -> "
-            f"{'AVAILABLE' if group == group_available else 'UNAVAILABLE'}"
+            f"[{idx}] Creating: {rec.name} | role={rec.job_role} | "
+            f"group={group_id} | views={rec.views} | open_to_work={rec.open_for_work} | "
+            f"priority={rec.priority} | creators={rec.creators_worked_with}"
         )
 
         try:
-            monday.create_item(board_id, group, rec.name, values)
+            monday.create_item(board_id, group_id, rec.name, values)
             existing.add(rec.ytjobs_profile_link)
             created += 1
             print(f"[{idx}] Created: {rec.name}")
@@ -544,7 +742,7 @@ def main() -> None:
             print(f"[{idx}] First attempt failed for {rec.name}: {e}")
             time.sleep(2)
             try:
-                monday.create_item(board_id, group, rec.name, values)
+                monday.create_item(board_id, group_id, rec.name, values)
                 existing.add(rec.ytjobs_profile_link)
                 created += 1
                 print(f"[{idx}] Created on retry: {rec.name}")
@@ -554,12 +752,8 @@ def main() -> None:
 
     print("========== FINAL SUMMARY ==========")
     print(f"Total scraped records: {len(records)}")
-    print(f"Available detected: {available_total}")
-    print(f"Unavailable detected: {unavailable_total}")
-    print(f"Unknown detected: {unknown_total}")
     print(f"Created monday items: {created}")
     print(f"Skipped existing: {skipped_existing}")
-    print(f"Skipped unavailable: {skipped_unavailable}")
     print(f"Failed: {failed}")
 
 
