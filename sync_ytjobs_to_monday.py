@@ -2,17 +2,36 @@
 import argparse
 import asyncio
 import json
-import os
 import re
 from dataclasses import dataclass, asdict
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Page
 
 YTJOBS_BASE = "https://ytjobs.co"
 SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
+
+# =========================
+# HARD CODED MONDAY CONFIG
+# =========================
+MONDAY_API_TOKEN = "PASTE_YOUR_MONDAY_API_TOKEN_HERE"
+MONDAY_BOARD_ID = 18406893281
+
+# Replace these if your real group IDs are different
+MONDAY_GROUP_AVAILABLE = "topics"
+MONDAY_GROUP_UNAVAILABLE = "group_mm20bark"
+
+MONDAY_COLUMNS = {
+    "linkedin": "text_mm20d7rp",
+    "ytjobs_profile_link": "text_mm20a03h",
+    "email": "text_mm2028sd",
+    "years_of_experience": "numeric_mm20gyp",
+    "priority": "color_mm204cwh",
+    "open_for_work": "boolean_mm20xkyn",
+    "creators_worked_with": "dropdown_mm20xxmt",
+    "views": "numeric_mm20rjas",
+}
 
 
 @dataclass
@@ -69,7 +88,14 @@ def _walk(obj: Any):
 def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
     keys = {k.lower(): k for k in d.keys()}
     name_key = next((keys[k] for k in keys if k in {"name", "full_name", "talent_name"}), None)
-    profile_key = next((keys[k] for k in keys if "profile" in k and "link" in k or "url" in k and "ytjobs" in str(d.get(k, "")).lower()), None)
+    profile_key = next(
+        (
+            keys[k]
+            for k in keys
+            if ("profile" in k and "link" in k) or ("url" in k and "ytjobs" in str(d.get(keys[k], "")).lower())
+        ),
+        None,
+    )
 
     if not name_key:
         return None
@@ -98,6 +124,7 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
     for k, v in d.items():
         if "year" in k.lower() and "exp" in k.lower():
             years = _extract_num(str(v))
+            break
 
     open_for_work = None
     for k, v in d.items():
@@ -110,11 +137,13 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
     for k, v in d.items():
         if "view" in k.lower():
             views = _extract_num(str(v))
+            break
 
     creators = None
     for k, v in d.items():
         if "creator" in k.lower() and isinstance(v, list):
             creators = [str(x) for x in v if x]
+            break
 
     return TalentRecord(
         name=name,
@@ -168,9 +197,11 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             if not lines:
                 continue
+
             name = lines[0]
             linkedin_match = re.search(r"https?://(?:www\.)?linkedin\.com/[^\s]+", text, re.I)
             email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, re.I)
+
             rec = TalentRecord(
                 name=name,
                 ytjobs_profile_link=href,
@@ -216,7 +247,7 @@ class MondayClient:
             items_page(limit: 500, cursor: $cursor) {
               cursor
               items {
-                column_values(ids: [\"YTJOBS_COL\"]) {
+                column_values(ids: ["YTJOBS_COL"]) {
                   text
                 }
               }
@@ -224,18 +255,23 @@ class MondayClient:
           }
         }
         """.replace("YTJOBS_COL", ytjobs_column_id)
+
         cursor = None
         results: set[str] = set()
+
         while True:
             data = self._post(query, {"board_id": board_id, "cursor": cursor})
             page = data["boards"][0]["items_page"]
+
             for item in page["items"]:
                 val = item["column_values"][0]["text"]
                 if val:
                     results.add(val.strip())
+
             cursor = page.get("cursor")
             if not cursor:
                 break
+
         return results
 
     def create_item(self, board_id: int, group_id: str, item_name: str, column_values: dict[str, Any]) -> None:
@@ -263,16 +299,22 @@ def build_column_values(rec: TalentRecord, col: dict[str, str]) -> dict[str, Any
         col["ytjobs_profile_link"]: rec.ytjobs_profile_link,
         col["email"]: rec.email,
     }
+
     if rec.years_of_experience is not None:
         vals[col["years_of_experience"]] = rec.years_of_experience
+
     if rec.open_for_work is not None:
         vals[col["open_for_work"]] = rec.open_for_work
+
     if rec.creators_worked_with:
         vals[col["creators_worked_with"]] = {"labels": rec.creators_worked_with}
+
     if rec.views is not None:
         vals[col["views"]] = rec.views
+
     if rec.priority:
         vals[col["priority"]] = {"label": rec.priority}
+
     return vals
 
 
@@ -284,17 +326,22 @@ async def scrape(
     stop_after_known_pages: int = 2,
 ) -> list[TalentRecord]:
     known_profile_links = known_profile_links or set()
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
         ctx = await browser.new_context()
         page = await ctx.new_page()
+
         all_records: list[TalentRecord] = []
         consecutive_fully_known_pages = 0
+
         for page_no in range(1, max_pages + 1):
             records = await _scrape_page(page, page_no)
             if not records:
                 break
+
             all_records.extend(records)
+
             if incremental_mode:
                 unseen_on_page = [
                     rec
@@ -305,66 +352,56 @@ async def scrape(
                     consecutive_fully_known_pages = 0
                 else:
                     consecutive_fully_known_pages += 1
+
                 if consecutive_fully_known_pages >= stop_after_known_pages:
                     break
+
         await browser.close()
+
     dedup: dict[str, TalentRecord] = {}
     for rec in all_records:
         key = rec.ytjobs_profile_link or rec.name.lower()
         if key and key not in dedup:
             dedup[key] = rec
+
     return list(dedup.values())
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scrape YTJobs talent and sync to monday.com")
-    parser.add_argument("--max-pages", type=int, default=int(os.getenv("MAX_PAGES", "20")))
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=os.getenv("HEADLESS", "true").lower() == "true")
-    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=os.getenv("DRY_RUN", "false").lower() == "true")
-    parser.add_argument(
-        "--incremental",
-        action=argparse.BooleanOptionalAction,
-        default=os.getenv("INCREMENTAL_MODE", "false").lower() == "true",
-    )
+    parser.add_argument("--max-pages", type=int, default=20)
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--incremental", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--stop-after-known-pages",
         type=int,
-        default=int(os.getenv("STOP_AFTER_KNOWN_PAGES", "2")),
+        default=2,
         help="Incremental mode: stop after this many consecutive pages with no unseen profiles.",
     )
     parser.add_argument(
         "--include-unavailable",
         action=argparse.BooleanOptionalAction,
-        default=os.getenv("INCLUDE_UNAVAILABLE", "true").lower() == "true",
+        default=True,
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    load_dotenv()
     args = parse_args()
 
-    token = os.getenv("MONDAY_API_TOKEN", "")
-    board_id = int(os.getenv("MONDAY_BOARD_ID", "18406893281"))
-    group_available = os.getenv("MONDAY_GROUP_AVAILABLE", "topics")
-    group_unavailable = os.getenv("MONDAY_GROUP_UNAVAILABLE", "group_mm20bark")
+    token = MONDAY_API_TOKEN
+    board_id = MONDAY_BOARD_ID
+    group_available = MONDAY_GROUP_AVAILABLE
+    group_unavailable = MONDAY_GROUP_UNAVAILABLE
+    columns = MONDAY_COLUMNS
 
     if not token and not args.dry_run:
         raise RuntimeError("MONDAY_API_TOKEN is required unless --dry-run is enabled")
 
-    columns = {
-        "linkedin": "text_mm20d7rp",
-        "ytjobs_profile_link": "text_mm20a03h",
-        "email": "text_mm2028sd",
-        "years_of_experience": "numeric_mm20gyp",
-        "priority": "color_mm204cwh",
-        "open_for_work": "boolean_mm20xkyn",
-        "creators_worked_with": "dropdown_mm20xxmt",
-        "views": "numeric_mm20rjas",
-    }
-
     monday = MondayClient(token) if token else None
     existing = set()
+
     if monday:
         existing = monday.get_existing_profile_links(board_id, columns["ytjobs_profile_link"])
 
@@ -377,6 +414,7 @@ def main() -> None:
             stop_after_known_pages=max(1, args.stop_after_known_pages),
         )
     )
+
     print(f"Scraped records: {len(records)}")
 
     if args.dry_run:
@@ -389,18 +427,30 @@ def main() -> None:
         raise RuntimeError("MONDAY_API_TOKEN is required unless --dry-run is enabled")
 
     created = 0
+    skipped_existing = 0
+    skipped_unavailable = 0
+
     for rec in records:
         if not rec.ytjobs_profile_link or rec.ytjobs_profile_link in existing:
+            skipped_existing += 1
             continue
+
         if not args.include_unavailable and rec.open_for_work is not True:
+            skipped_unavailable += 1
             continue
+
         group = group_available if rec.open_for_work is not False else group_unavailable
         values = build_column_values(rec, columns)
+
         monday.create_item(board_id, group, rec.name, values)
         existing.add(rec.ytjobs_profile_link)
         created += 1
 
+        print(f"Created: {rec.name}")
+
     print(f"Created monday items: {created}")
+    print(f"Skipped existing: {skipped_existing}")
+    print(f"Skipped unavailable: {skipped_unavailable}")
 
 
 if __name__ == "__main__":
