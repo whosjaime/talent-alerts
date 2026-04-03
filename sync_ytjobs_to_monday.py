@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -17,10 +18,8 @@ SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
 # CONFIG
 # =========================
 
-# Keep this as a GitHub secret / environment variable
 MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "")
 
-# Hardcoded monday config
 MONDAY_BOARD_ID = 18406893281
 MONDAY_GROUP_AVAILABLE = "topics"
 MONDAY_GROUP_UNAVAILABLE = "group_mm20bark"
@@ -34,6 +33,13 @@ MONDAY_COLUMNS = {
     "open_for_work": "boolean_mm20xkyn",
     "creators_worked_with": "dropdown_mm20xxmt",
     "views": "numeric_mm20rjas",
+}
+
+VALID_CREATOR_LABELS = {
+    "Editors",
+    "Thumbnail Designers",
+    "Animators",
+    "Scriptwriters",
 }
 
 
@@ -90,7 +96,6 @@ def _walk(obj: Any):
 
 def _normalize_priority(rec: TalentRecord) -> str:
     score = 0
-
     if rec.email:
         score += 1
     if rec.linkedin:
@@ -107,6 +112,49 @@ def _normalize_priority(rec: TalentRecord) -> str:
     if score == 2:
         return "Medium"
     return "Low"
+
+
+def _clean_creators(creators: list[str] | None) -> list[str] | None:
+    if not creators:
+        return None
+    cleaned = []
+    for item in creators:
+        val = str(item).strip()
+        if val in VALID_CREATOR_LABELS and val not in cleaned:
+            cleaned.append(val)
+    return cleaned or None
+
+
+def _detect_open_for_work_from_text(text: str) -> bool | None:
+    if not text:
+        return None
+
+    t = text.lower()
+
+    unavailable_signals = [
+        "not available",
+        "unavailable",
+        "not open for work",
+        "closed to work",
+        "not hiring",
+    ]
+    available_signals = [
+        "open for work",
+        "hire me",
+        "available for work",
+        "available now",
+        "available",
+    ]
+
+    for signal in unavailable_signals:
+        if signal in t:
+            return False
+
+    for signal in available_signals:
+        if signal in t:
+            return True
+
+    return None
 
 
 def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
@@ -129,9 +177,7 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
     if not name:
         return None
 
-    profile = ""
-    if profile_key:
-        profile = str(d.get(profile_key) or "")
+    profile = str(d.get(profile_key) or "") if profile_key else ""
 
     linkedin = ""
     for k, v in d.items():
@@ -159,6 +205,9 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
             open_for_work = v
             break
 
+    if open_for_work is None:
+        open_for_work = _detect_open_for_work_from_text(json.dumps(d, ensure_ascii=False))
+
     views = None
     for k, v in d.items():
         if "view" in k.lower():
@@ -178,7 +227,7 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
         email=email,
         years_of_experience=years,
         open_for_work=open_for_work,
-        creators_worked_with=creators,
+        creators_worked_with=_clean_creators(creators),
         views=views,
     )
     rec.priority = _normalize_priority(rec)
@@ -203,8 +252,10 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
                 candidates.append(rec)
 
     page.on("response", on_response)
+
+    print(f"Scraping page {page_no}: {url}")
     await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(4000)
 
     if not candidates:
         raw = await page.evaluate(
@@ -214,13 +265,26 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
               return cards.map(a => {
                 const wrap = a.closest('article, li, div') || a.parentElement;
                 const txt = wrap ? wrap.innerText : a.innerText;
-                return {href: a.getAttribute('href') || '', text: txt || ''};
+
+                const img = wrap ? wrap.querySelector('img') : null;
+                const imgAlt = img ? (img.getAttribute('alt') || '') : '';
+                const imgTitle = img ? (img.getAttribute('title') || '') : '';
+                const imgSrc = img ? (img.getAttribute('src') || '') : '';
+
+                return {
+                  href: a.getAttribute('href') || '',
+                  text: txt || '',
+                  img_alt: imgAlt,
+                  img_title: imgTitle,
+                  img_src: imgSrc
+                };
               });
             }
             """
         )
+
         for row in raw:
-            text = row.get("text", "")
+            text = row.get("text", "") or ""
             href = _to_absolute(row.get("href", ""))
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             if not lines:
@@ -230,14 +294,24 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
             linkedin_match = re.search(r"https?://(?:www\.)?linkedin\.com/[^\s]+", text, re.I)
             email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, re.I)
 
+            availability_blob = " ".join(
+                [
+                    text,
+                    row.get("img_alt", "") or "",
+                    row.get("img_title", "") or "",
+                    row.get("img_src", "") or "",
+                ]
+            )
+
             rec = TalentRecord(
                 name=name,
                 ytjobs_profile_link=href,
                 linkedin=linkedin_match.group(0) if linkedin_match else "",
                 email=email_match.group(0) if email_match else "",
                 years_of_experience=_extract_num(text) if "year" in text.lower() else None,
-                open_for_work=True if "open for work" in text.lower() else None,
+                open_for_work=_detect_open_for_work_from_text(availability_blob),
                 views=_extract_num(text) if "view" in text.lower() else None,
+                creators_worked_with=None,
             )
             rec.priority = _normalize_priority(rec)
             candidates.append(rec)
@@ -249,7 +323,17 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
             unique[key] = rec
 
     page.remove_listener("response", on_response)
-    return list(unique.values())
+    page_records = list(unique.values())
+    available_count = sum(1 for r in page_records if r.open_for_work is True)
+    unavailable_count = sum(1 for r in page_records if r.open_for_work is False)
+    unknown_count = sum(1 for r in page_records if r.open_for_work is None)
+
+    print(f"Page {page_no} records found: {len(page_records)}")
+    print(
+        f"Page {page_no} availability breakdown -> "
+        f"available: {available_count}, unavailable: {unavailable_count}, unknown: {unknown_count}"
+    )
+    return page_records
 
 
 class MondayClient:
@@ -349,44 +433,20 @@ def build_column_values(rec: TalentRecord, col: dict[str, str]) -> dict[str, Any
     return vals
 
 
-async def scrape(
-    max_pages: int,
-    headless: bool,
-    known_profile_links: set[str] | None = None,
-    incremental_mode: bool = False,
-    stop_after_known_pages: int = 2,
-) -> list[TalentRecord]:
-    known_profile_links = known_profile_links or set()
-
+async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
         ctx = await browser.new_context()
         page = await ctx.new_page()
 
         all_records: list[TalentRecord] = []
-        consecutive_fully_known_pages = 0
 
         for page_no in range(1, max_pages + 1):
             records = await _scrape_page(page, page_no)
             if not records:
+                print(f"No records found on page {page_no}; stopping scrape.")
                 break
-
             all_records.extend(records)
-
-            if incremental_mode:
-                unseen_on_page = [
-                    rec
-                    for rec in records
-                    if rec.ytjobs_profile_link and rec.ytjobs_profile_link not in known_profile_links
-                ]
-
-                if unseen_on_page:
-                    consecutive_fully_known_pages = 0
-                else:
-                    consecutive_fully_known_pages += 1
-
-                if consecutive_fully_known_pages >= stop_after_known_pages:
-                    break
 
         await browser.close()
 
@@ -401,21 +461,10 @@ async def scrape(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scrape YTJobs talent and sync to monday.com")
-    parser.add_argument("--max-pages", type=int, default=20)
+    parser.add_argument("--max-pages", type=int, default=1000)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--incremental", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument(
-        "--stop-after-known-pages",
-        type=int,
-        default=2,
-        help="Incremental mode: stop after this many consecutive pages with no unseen profiles.",
-    )
-    parser.add_argument(
-        "--include-unavailable",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
+    parser.add_argument("--include-unavailable", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -424,9 +473,9 @@ def main() -> None:
 
     token = MONDAY_API_TOKEN
     board_id = MONDAY_BOARD_ID
+    columns = MONDAY_COLUMNS
     group_available = MONDAY_GROUP_AVAILABLE
     group_unavailable = MONDAY_GROUP_UNAVAILABLE
-    columns = MONDAY_COLUMNS
 
     if not token and not args.dry_run:
         raise RuntimeError("MONDAY_API_TOKEN is required unless --dry-run is enabled")
@@ -435,22 +484,24 @@ def main() -> None:
     existing = set()
 
     if monday:
+        print("Loading existing monday YTJobs profile links...")
         existing = monday.get_existing_profile_links(board_id, columns["ytjobs_profile_link"])
+        print(f"Existing monday links: {len(existing)}")
 
-    records = asyncio.run(
-        scrape(
-            args.max_pages,
-            args.headless,
-            known_profile_links=existing,
-            incremental_mode=args.incremental,
-            stop_after_known_pages=max(1, args.stop_after_known_pages),
-        )
+    records = asyncio.run(scrape(args.max_pages, args.headless))
+    print(f"Total scraped records: {len(records)}")
+
+    available_total = sum(1 for r in records if r.open_for_work is True)
+    unavailable_total = sum(1 for r in records if r.open_for_work is False)
+    unknown_total = sum(1 for r in records if r.open_for_work is None)
+
+    print(
+        f"Availability totals -> available: {available_total}, "
+        f"unavailable: {unavailable_total}, unknown: {unknown_total}"
     )
 
-    print(f"Scraped records: {len(records)}")
-
     if args.dry_run:
-        for rec in records[:10]:
+        for rec in records[:25]:
             print(json.dumps(asdict(rec), ensure_ascii=False))
         print("Dry run mode enabled; no monday updates sent.")
         return
@@ -463,8 +514,12 @@ def main() -> None:
     skipped_unavailable = 0
     failed = 0
 
-    for rec in records:
-        if not rec.ytjobs_profile_link or rec.ytjobs_profile_link in existing:
+    for idx, rec in enumerate(records, start=1):
+        if not rec.ytjobs_profile_link:
+            print(f"[{idx}] Skipping {rec.name} - missing YTJobs profile link")
+            continue
+
+        if rec.ytjobs_profile_link in existing:
             skipped_existing += 1
             continue
 
@@ -472,18 +527,36 @@ def main() -> None:
             skipped_unavailable += 1
             continue
 
-        group = group_available if rec.open_for_work is not False else group_unavailable
+        group = group_available if rec.open_for_work is True else group_unavailable
         values = build_column_values(rec, columns)
+
+        print(
+            f"[{idx}] Creating: {rec.name} -> "
+            f"{'AVAILABLE' if group == group_available else 'UNAVAILABLE'}"
+        )
 
         try:
             monday.create_item(board_id, group, rec.name, values)
             existing.add(rec.ytjobs_profile_link)
             created += 1
-            print(f"Created: {rec.name}")
+            print(f"[{idx}] Created: {rec.name}")
         except Exception as e:
-            failed += 1
-            print(f"Failed to create item for {rec.name}: {e}")
+            print(f"[{idx}] First attempt failed for {rec.name}: {e}")
+            time.sleep(2)
+            try:
+                monday.create_item(board_id, group, rec.name, values)
+                existing.add(rec.ytjobs_profile_link)
+                created += 1
+                print(f"[{idx}] Created on retry: {rec.name}")
+            except Exception as e2:
+                failed += 1
+                print(f"[{idx}] Failed permanently for {rec.name}: {e2}")
 
+    print("========== FINAL SUMMARY ==========")
+    print(f"Total scraped records: {len(records)}")
+    print(f"Available detected: {available_total}")
+    print(f"Unavailable detected: {unavailable_total}")
+    print(f"Unknown detected: {unknown_total}")
     print(f"Created monday items: {created}")
     print(f"Skipped existing: {skipped_existing}")
     print(f"Skipped unavailable: {skipped_unavailable}")
