@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import os
 import re
 from dataclasses import dataclass, asdict
 from typing import Any
@@ -13,13 +14,14 @@ YTJOBS_BASE = "https://ytjobs.co"
 SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
 
 # =========================
-# HARD CODED MONDAY CONFIG
+# CONFIG
 # =========================
-import os
-MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "")
-MONDAY_BOARD_ID = 18406893281
 
-# Replace these if your real group IDs are different
+# Keep this as a GitHub secret / environment variable
+MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "")
+
+# Hardcoded monday config
+MONDAY_BOARD_ID = 18406893281
 MONDAY_GROUP_AVAILABLE = "topics"
 MONDAY_GROUP_UNAVAILABLE = "group_mm20bark"
 
@@ -86,6 +88,27 @@ def _walk(obj: Any):
             yield from _walk(item)
 
 
+def _normalize_priority(rec: TalentRecord) -> str:
+    score = 0
+
+    if rec.email:
+        score += 1
+    if rec.linkedin:
+        score += 1
+    if rec.open_for_work is True:
+        score += 1
+    if rec.years_of_experience is not None and rec.years_of_experience >= 5:
+        score += 1
+
+    if score >= 4:
+        return "Critical ⚠️️"
+    if score == 3:
+        return "High"
+    if score == 2:
+        return "Medium"
+    return "Low"
+
+
 def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
     keys = {k.lower(): k for k in d.keys()}
     name_key = next((keys[k] for k in keys if k in {"name", "full_name", "talent_name"}), None)
@@ -93,7 +116,8 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
         (
             keys[k]
             for k in keys
-            if ("profile" in k and "link" in k) or ("url" in k and "ytjobs" in str(d.get(keys[k], "")).lower())
+            if ("profile" in k and "link" in k)
+            or ("url" in k and "ytjobs" in str(d.get(keys[k], "")).lower())
         ),
         None,
     )
@@ -112,18 +136,19 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
     linkedin = ""
     for k, v in d.items():
         if "linkedin" in k.lower() and isinstance(v, str):
-            linkedin = v
+            linkedin = v.strip()
             break
 
     email = ""
     for k, v in d.items():
         if "email" in k.lower() and isinstance(v, str):
-            email = v
+            email = v.strip()
             break
 
     years = None
     for k, v in d.items():
-        if "year" in k.lower() and "exp" in k.lower():
+        lk = k.lower()
+        if "year" in lk and "exp" in lk:
             years = _extract_num(str(v))
             break
 
@@ -143,10 +168,10 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
     creators = None
     for k, v in d.items():
         if "creator" in k.lower() and isinstance(v, list):
-            creators = [str(x) for x in v if x]
+            creators = [str(x).strip() for x in v if x]
             break
 
-    return TalentRecord(
+    rec = TalentRecord(
         name=name,
         ytjobs_profile_link=_to_absolute(profile),
         linkedin=linkedin,
@@ -156,6 +181,8 @@ def _from_dict(d: dict[str, Any]) -> TalentRecord | None:
         creators_worked_with=creators,
         views=views,
     )
+    rec.priority = _normalize_priority(rec)
+    return rec
 
 
 async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
@@ -212,6 +239,7 @@ async def _scrape_page(page: Page, page_no: int) -> list[TalentRecord]:
                 open_for_work=True if "open for work" in text.lower() else None,
                 views=_extract_num(text) if "view" in text.lower() else None,
             )
+            rec.priority = _normalize_priority(rec)
             candidates.append(rec)
 
     unique: dict[str, TalentRecord] = {}
@@ -265,7 +293,9 @@ class MondayClient:
             page = data["boards"][0]["items_page"]
 
             for item in page["items"]:
-                val = item["column_values"][0]["text"]
+                if not item["column_values"]:
+                    continue
+                val = item["column_values"][0].get("text")
                 if val:
                     results.add(val.strip())
 
@@ -349,6 +379,7 @@ async def scrape(
                     for rec in records
                     if rec.ytjobs_profile_link and rec.ytjobs_profile_link not in known_profile_links
                 ]
+
                 if unseen_on_page:
                     consecutive_fully_known_pages = 0
                 else:
@@ -430,6 +461,7 @@ def main() -> None:
     created = 0
     skipped_existing = 0
     skipped_unavailable = 0
+    failed = 0
 
     for rec in records:
         if not rec.ytjobs_profile_link or rec.ytjobs_profile_link in existing:
@@ -443,15 +475,19 @@ def main() -> None:
         group = group_available if rec.open_for_work is not False else group_unavailable
         values = build_column_values(rec, columns)
 
-        monday.create_item(board_id, group, rec.name, values)
-        existing.add(rec.ytjobs_profile_link)
-        created += 1
-
-        print(f"Created: {rec.name}")
+        try:
+            monday.create_item(board_id, group, rec.name, values)
+            existing.add(rec.ytjobs_profile_link)
+            created += 1
+            print(f"Created: {rec.name}")
+        except Exception as e:
+            failed += 1
+            print(f"Failed to create item for {rec.name}: {e}")
 
     print(f"Created monday items: {created}")
     print(f"Skipped existing: {skipped_existing}")
     print(f"Skipped unavailable: {skipped_unavailable}")
+    print(f"Failed: {failed}")
 
 
 if __name__ == "__main__":
