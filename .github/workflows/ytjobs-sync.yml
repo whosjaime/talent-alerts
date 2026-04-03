@@ -25,6 +25,8 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run sync
+        env:
+          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
         run: |
           python sync_ytjobs_to_monday.py \
             --headless \
