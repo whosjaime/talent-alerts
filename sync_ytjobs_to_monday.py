@@ -14,18 +14,28 @@ YTJOBS_BASE = "https://ytjobs.co"
 SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
 
 MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "")
-MONDAY_BOARD_ID = 18406893281
+MONDAY_BOARD_ID = int(os.getenv("MONDAY_BOARD_ID", "18406893281"))
+MONDAY_DEFAULT_GROUP_ID = os.getenv("MONDAY_DEFAULT_GROUP_ID", "topics")
 
-# No default group. Only mapped role groups.
+# Role groups can be overridden by environment variables.
+# Leave a value blank to route that role to MONDAY_DEFAULT_GROUP_ID.
 ROLE_TO_GROUP_ID = {
-    "Channel Manager": "topics",
-    "Strategist": "group_mm20bark",
-    "Producer": "group_mm22zy6t",
-    "Creative Director": "group_mm22x74p",
-    "Editor": "group_mm22v92w",
-    "Scriptwriter": "group_mm22hc00",
-    "Thumbnail Designer": "group_mm22jqd",
-    "Animator": "group_mm22agrt",
+    "Channel Manager": os.getenv("MONDAY_GROUP_CHANNEL_MANAGER", "group_mm1v3xqy"),
+    "Strategist": os.getenv("MONDAY_GROUP_STRATEGIST", "group_mm1vazt5"),
+    "Producer": os.getenv("MONDAY_GROUP_PRODUCER", "group_mm1vm88z"),
+    "Creative Director": os.getenv("MONDAY_GROUP_CREATIVE_DIRECTOR", "group_mm1vqh7r"),
+    "Lead Editor": os.getenv("MONDAY_GROUP_LEAD_EDITOR", "group_mm1vfz8e"),
+    "Long-Form Editor": os.getenv("MONDAY_GROUP_LONG_FORM_EDITOR", "group_mm1vm5fm"),
+    "Short-Form Editor": os.getenv("MONDAY_GROUP_SHORT_FORM_EDITOR", "group_mm1vxj09"),
+    "Scriptwriter": os.getenv("MONDAY_GROUP_SCRIPTWRITER", "group_mm1vsj1h"),
+    "Personal Assistant": os.getenv("MONDAY_GROUP_PERSONAL_ASSISTANT", "group_mm1vscae"),
+    "Engineer": os.getenv("MONDAY_GROUP_ENGINEER", "group_mm1vrk6s"),
+    "Developer": os.getenv("MONDAY_GROUP_DEVELOPER", "group_mm1vv541"),
+    "Graphic Designer": os.getenv("MONDAY_GROUP_GRAPHIC_DESIGNER", "group_mm1v5svb"),
+    "Operations": os.getenv("MONDAY_GROUP_OPERATIONS", "group_mm1vb85k"),
+    "Thumbnail Designer": os.getenv("MONDAY_GROUP_THUMBNAIL_DESIGNER", "group_mm1vavxj"),
+    "Animator": os.getenv("MONDAY_GROUP_ANIMATOR", "topics"),
+    "Content Creator": os.getenv("MONDAY_GROUP_CONTENT_CREATOR", "group_mm1vpgyz"),
 }
 
 MONDAY_COLUMNS = {
@@ -54,17 +64,27 @@ ROLE_ALIASES = {
     "content strategist": "Strategist",
     "producer": "Producer",
     "creative director": "Creative Director",
-    "editor": "Editor",
-    "video editor": "Editor",
-    "lead editor": "Editor",
-    "short-form editor": "Editor",
-    "short form editor": "Editor",
-    "long-form editor": "Editor",
-    "long form editor": "Editor",
+    "editor": "Long-Form Editor",
+    "video editor": "Long-Form Editor",
+    "lead editor": "Lead Editor",
+    "short-form editor": "Short-Form Editor",
+    "short form editor": "Short-Form Editor",
+    "long-form editor": "Long-Form Editor",
+    "long form editor": "Long-Form Editor",
     "scriptwriter": "Scriptwriter",
     "script writer": "Scriptwriter",
+    "personal assistant": "Personal Assistant",
+    "assistant": "Personal Assistant",
+    "engineer": "Engineer",
+    "developer": "Developer",
+    "graphic designer": "Graphic Designer",
+    "designer": "Graphic Designer",
+    "operations": "Operations",
+    "ops": "Operations",
     "thumbnail designer": "Thumbnail Designer",
     "animator": "Animator",
+    "content creator": "Content Creator",
+    "creator": "Content Creator",
 }
 
 JUNK_NAME_PATTERNS = [
@@ -118,8 +138,13 @@ def _to_absolute(url: str) -> str:
     return url
 
 
+def _normalize_profile_link(url: str) -> str:
+    absolute = _to_absolute(url).strip()
+    return absolute.rstrip("/")
+
+
 def _looks_like_valid_profile_url(url: str) -> bool:
-    absolute = _to_absolute(url)
+    absolute = _normalize_profile_link(url)
     return any(p.match(absolute) for p in PROFILE_PATTERNS)
 
 
@@ -257,7 +282,7 @@ def _normalize_priority(rec: TalentRecord) -> str:
 
 def _pick_profile_link(href: str, nested_links: list[str]) -> str:
     for candidate in [href] + (nested_links or []):
-        absolute = _to_absolute(candidate)
+        absolute = _normalize_profile_link(candidate)
         if _looks_like_valid_profile_url(absolute):
             return absolute
     return ""
@@ -429,7 +454,7 @@ class MondayClient:
                     continue
                 val = item["column_values"][0].get("text")
                 if val:
-                    results.add(val.strip())
+                    results.add(_normalize_profile_link(val))
             cursor = page.get("cursor")
             if not cursor:
                 break
@@ -509,15 +534,19 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
     dedup = {}
     for rec in all_records:
         if rec.ytjobs_profile_link:
-            dedup[rec.ytjobs_profile_link] = rec
+            dedup[_normalize_profile_link(rec.ytjobs_profile_link)] = rec
     return list(dedup.values())
 
 
 def parse_args() -> argparse.Namespace:
+    env_max_pages = int(os.getenv("MAX_PAGES", "1000"))
+    env_headless = os.getenv("HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
+    env_dry_run = os.getenv("DRY_RUN", "false").strip().lower() in {"1", "true", "yes"}
+
     parser = argparse.ArgumentParser(description="Scrape YTJobs talent and sync to monday.com")
-    parser.add_argument("--max-pages", type=int, default=1000)
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--max-pages", type=int, default=env_max_pages)
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=env_headless)
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=env_dry_run)
     return parser.parse_args()
 
 
@@ -546,7 +575,7 @@ def main() -> None:
 
     created = 0
     skipped_existing = 0
-    skipped_unmapped_role = 0
+    used_default_group = 0
     failed = 0
 
     for idx, rec in enumerate(records, start=1):
@@ -554,12 +583,14 @@ def main() -> None:
             skipped_existing += 1
             continue
 
-        if not rec.job_role or rec.job_role not in ROLE_TO_GROUP_ID:
-            skipped_unmapped_role += 1
-            print(f"[{idx}] Skipping unmapped role: {rec.name} | role={rec.job_role}")
-            continue
-
-        group_id = ROLE_TO_GROUP_ID[rec.job_role]
+        mapped_group_id = ROLE_TO_GROUP_ID.get(rec.job_role or "")
+        group_id = mapped_group_id or MONDAY_DEFAULT_GROUP_ID
+        if not mapped_group_id:
+            used_default_group += 1
+            print(
+                f"[{idx}] Role not mapped; using default group '{MONDAY_DEFAULT_GROUP_ID}': "
+                f"{rec.name} | role={rec.job_role}"
+            )
         values = build_column_values(rec)
 
         print(
@@ -587,7 +618,7 @@ def main() -> None:
     print(f"Total scraped valid records: {len(records)}")
     print(f"Created monday items: {created}")
     print(f"Skipped existing: {skipped_existing}")
-    print(f"Skipped unmapped role: {skipped_unmapped_role}")
+    print(f"Used default group for unmapped/unknown role: {used_default_group}")
     print(f"Failed: {failed}")
 
     if len(records) > 0 and created == 0:
