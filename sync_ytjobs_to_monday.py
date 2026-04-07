@@ -420,35 +420,60 @@ async def _detect_open_to_work_from_page(page: Page, body_text: str) -> bool | N
 async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]:
     url = SEARCH_URL.format(page=page_no)
     print(f"Scraping directory page {page_no}: {url}")
-    await page.goto(url, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(3000)
+    await page.goto(url, wait_until="networkidle", timeout=90000)
+    await page.wait_for_timeout(5000)
+
+    await page.mouse.wheel(0, 2500)
+    await page.wait_for_timeout(2000)
+
+    try:
+        title = await page.title()
+        body_preview = await page.locator("body").inner_text()
+        print("PAGE TITLE:", title)
+        print("BODY PREVIEW:", body_preview[:1000])
+    except Exception as e:
+        print("Preview read failed:", e)
 
     raw = await page.evaluate(
         """
         () => {
-          const els = Array.from(document.querySelectorAll('a, button'));
+          const selectors = [
+            'article',
+            'li',
+            '[class*="card"]',
+            '[class*="talent"]',
+            '[class*="profile"]'
+          ];
+
+          const seen = new Set();
+          const blocks = [];
+
+          for (const sel of selectors) {
+            for (const el of document.querySelectorAll(sel)) {
+              if (!seen.has(el)) {
+                seen.add(el);
+                blocks.push(el);
+              }
+            }
+          }
+
           const rows = [];
 
-          for (const el of els) {
-            const text = (el.innerText || el.textContent || '').trim();
-            const href = el.tagName.toLowerCase() === 'a' ? (el.getAttribute('href') || '') : '';
-            const wrap = el.closest('article, li, [class*="card"], [class*="profile"], [class*="talent"], div') || el.parentElement;
-            const blockText = wrap ? (wrap.innerText || wrap.textContent || '') : text;
-            const nestedLinks = wrap ? Array.from(wrap.querySelectorAll('a[href]')).map(a => a.getAttribute('href') || '') : [];
+          for (const block of blocks) {
+            const text = (block.innerText || block.textContent || '').trim();
+            if (!text) continue;
 
-            const relevant =
-              href.includes('/talent/') ||
-              href.includes('/profile/') ||
-              nestedLinks.some(x => x.includes('/talent/') || x.includes('/profile/')) ||
-              /view profile/i.test(text) ||
-              /view full profile/i.test(text);
+            const links = Array.from(block.querySelectorAll('a[href]'))
+              .map(a => a.getAttribute('href') || '')
+              .filter(Boolean);
 
-            if (!relevant) continue;
+            const profileLink =
+              links.find(x => x.includes('/talent/') || x.includes('/profile/')) || '';
 
             rows.push({
-              text: blockText || '',
-              href: href || '',
-              nested_links: nestedLinks
+              text,
+              href: profileLink,
+              nested_links: links
             });
           }
 
@@ -457,6 +482,8 @@ async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]
         """
     )
 
+    print(f"Raw candidate blocks found: {len(raw)}")
+
     dedup = {}
     for row in raw:
         text = (row.get("text", "") or "").strip()
@@ -464,7 +491,7 @@ async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]
             continue
 
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if not lines:
+        if len(lines) < 2:
             continue
 
         name = lines[0]
@@ -493,21 +520,6 @@ async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]
             youtube=youtube,
         )
         rec.priority = _normalize_priority(rec)
-
-        has_signal = any(
-            [
-                rec.linkedin,
-                rec.years_of_experience is not None,
-                rec.open_for_work is not None,
-                rec.views,
-                rec.job_role is not None,
-                rec.niche,
-                rec.creators_worked_with,
-            ]
-        )
-        if not has_signal:
-            continue
-
         dedup[profile_link] = rec
 
     print(f"Directory page {page_no} valid records found: {len(dedup)}")
