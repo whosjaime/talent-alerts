@@ -17,6 +17,10 @@ on:
         description: "Run browser headless"
         required: false
         default: "true"
+      open_for_work_only:
+        description: "Only sync talent explicitly marked open for work"
+        required: false
+        default: "false"
 
 jobs:
   sync:
@@ -62,5 +66,6 @@ jobs:
           MAX_PAGES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_pages || '1000' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
           HEADLESS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.headless || 'true' }}
+          OPEN_FOR_WORK_ONLY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.open_for_work_only || 'false' }}
         run: |
           python sync_ytjobs_to_monday.py
