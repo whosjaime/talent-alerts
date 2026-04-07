@@ -14,7 +14,23 @@ YTJOBS_BASE = "https://ytjobs.co"
 SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
 
 MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "")
-MONDAY_BOARD_ID = int(os.getenv("MONDAY_BOARD_ID", "18406893281"))
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"Warning: invalid {name}={raw!r}; using default {default}")
+        return default
+
+
+MONDAY_BOARD_ID = _env_int("MONDAY_BOARD_ID", 18406893281)
 MONDAY_DEFAULT_GROUP_ID = os.getenv("MONDAY_DEFAULT_GROUP_ID", "topics")
 
 # Role groups can be overridden by environment variables.
