@@ -6,6 +6,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, asdict
+from urllib.parse import urljoin
 
 import httpx
 from playwright.async_api import async_playwright, Page
@@ -31,25 +32,18 @@ def _env_int(name: str, default: int) -> int:
 
 
 MONDAY_BOARD_ID = _env_int("MONDAY_BOARD_ID", 18406893281)
-MONDAY_DEFAULT_GROUP_ID = os.getenv("MONDAY_DEFAULT_GROUP_ID", "topics")
 
 ROLE_TO_GROUP_ID = {
-    "Channel Manager": os.getenv("MONDAY_GROUP_CHANNEL_MANAGER", "group_mm1v3xqy"),
-    "Strategist": os.getenv("MONDAY_GROUP_STRATEGIST", "group_mm1vazt5"),
-    "Producer": os.getenv("MONDAY_GROUP_PRODUCER", "group_mm1vm88z"),
-    "Creative Director": os.getenv("MONDAY_GROUP_CREATIVE_DIRECTOR", "group_mm1vqh7r"),
-    "Lead Editor": os.getenv("MONDAY_GROUP_LEAD_EDITOR", "group_mm1vfz8e"),
-    "Long-Form Editor": os.getenv("MONDAY_GROUP_LONG_FORM_EDITOR", "group_mm1vm5fm"),
-    "Short-Form Editor": os.getenv("MONDAY_GROUP_SHORT_FORM_EDITOR", "group_mm1vxj09"),
-    "Scriptwriter": os.getenv("MONDAY_GROUP_SCRIPTWRITER", "group_mm1vsj1h"),
-    "Personal Assistant": os.getenv("MONDAY_GROUP_PERSONAL_ASSISTANT", "group_mm1vscae"),
-    "Engineer": os.getenv("MONDAY_GROUP_ENGINEER", "group_mm1vrk6s"),
-    "Developer": os.getenv("MONDAY_GROUP_DEVELOPER", "group_mm1vv541"),
-    "Graphic Designer": os.getenv("MONDAY_GROUP_GRAPHIC_DESIGNER", "group_mm1v5svb"),
-    "Operations": os.getenv("MONDAY_GROUP_OPERATIONS", "group_mm1vb85k"),
-    "Thumbnail Designer": os.getenv("MONDAY_GROUP_THUMBNAIL_DESIGNER", "group_mm1vavxj"),
-    "Animator": os.getenv("MONDAY_GROUP_ANIMATOR", "topics"),
-    "Content Creator": os.getenv("MONDAY_GROUP_CONTENT_CREATOR", "group_mm1vpgyz"),
+    "Channel Manager": "topics",
+    "Strategist": "group_mm20bark",
+    "Producer": "group_mm22zy6t",
+    "Creative Director": "group_mm22x74p",
+    "Long-Form Editor": "group_mm22v92w",
+    "Lead Editor": "group_mm22v92w",
+    "Short-Form Editor": "group_mm22v92w",
+    "Scriptwriter": "group_mm22hc00",
+    "Thumbnail Designer": "group_mm22jqd",
+    "Animator": "group_mm22agrt",
 }
 
 MONDAY_COLUMNS = {
@@ -67,52 +61,89 @@ MONDAY_COLUMNS = {
 }
 
 ROLE_ALIASES = {
+    # CHANNEL MANAGER
     "channel manager": "Channel Manager",
+    "youtube manager": "Channel Manager",
+    "manager": "Channel Manager",
+    "production manager": "Channel Manager",
+    "project manager": "Channel Manager",
+    "content manager": "Channel Manager",
+    "brand manager": "Channel Manager",
+    "account manager": "Channel Manager",
+    "operations manager": "Channel Manager",
+    "growth manager": "Channel Manager",
+
+    # STRATEGIST
     "strategist": "Strategist",
     "youtube strategist": "Strategist",
     "content strategist": "Strategist",
+    "growth strategist": "Strategist",
+
+    # PRODUCER
     "producer": "Producer",
+    "youtube producer": "Producer",
+    "content producer": "Producer",
+    "video producer": "Producer",
+    "executive producer": "Producer",
+
+    # CREATIVE DIRECTOR
     "creative director": "Creative Director",
+    "creative lead": "Creative Director",
+    "head of creative": "Creative Director",
+
+    # EDITOR
     "editor": "Long-Form Editor",
     "video editor": "Long-Form Editor",
+    "youtube editor": "Long-Form Editor",
     "lead editor": "Lead Editor",
+    "senior editor": "Lead Editor",
     "short-form editor": "Short-Form Editor",
     "short form editor": "Short-Form Editor",
+    "reels editor": "Short-Form Editor",
+    "tiktok editor": "Short-Form Editor",
     "long-form editor": "Long-Form Editor",
     "long form editor": "Long-Form Editor",
+
+    # SCRIPTWRITER
     "scriptwriter": "Scriptwriter",
     "script writer": "Scriptwriter",
-    "personal assistant": "Personal Assistant",
-    "assistant": "Personal Assistant",
-    "engineer": "Engineer",
-    "developer": "Developer",
-    "graphic designer": "Graphic Designer",
-    "designer": "Graphic Designer",
-    "operations": "Operations",
-    "ops": "Operations",
+    "writer": "Scriptwriter",
+    "youtube writer": "Scriptwriter",
+    "content writer": "Scriptwriter",
+
+    # THUMBNAIL
     "thumbnail designer": "Thumbnail Designer",
+    "thumbnail artist": "Thumbnail Designer",
+    "thumb designer": "Thumbnail Designer",
+    "thumbnail": "Thumbnail Designer",
+
+    # ANIMATOR
     "animator": "Animator",
-    "content creator": "Content Creator",
-    "creator": "Content Creator",
+    "motion designer": "Animator",
+    "motion graphics": "Animator",
+    "motion graphic designer": "Animator",
+    "3d animator": "Animator",
+    "2d animator": "Animator",
 }
 
 DISPLAY_ROLE_ALIASES = {
     "Channel Manager": "Channel Manager",
     "Creative Director": "Creative Director",
     "Video Editor": "Long-Form Editor",
+    "Editor": "Long-Form Editor",
     "Lead Editor": "Lead Editor",
     "Thumbnail Designer": "Thumbnail Designer",
     "YouTube Strategist": "Strategist",
     "Strategist": "Strategist",
     "Producer": "Producer",
+    "YouTube Producer": "Producer",
     "Scriptwriter": "Scriptwriter",
-    "Personal Assistant": "Personal Assistant",
-    "Engineer": "Engineer",
-    "Developer": "Developer",
-    "Graphic Designer": "Graphic Designer",
-    "Operations": "Operations",
+    "Writer": "Scriptwriter",
     "Animator": "Animator",
-    "Content Creator": "Content Creator",
+    "Motion Designer": "Animator",
+    "Production Manager": "Channel Manager",
+    "Project Manager": "Channel Manager",
+    "Manager": "Channel Manager",
 }
 
 NICHE_KEYWORDS = {
@@ -233,7 +264,7 @@ def _detect_open_to_work_text(text: str) -> bool | None:
     t = text.lower()
     if any(x in t for x in ["not available", "unavailable", "not open for work"]):
         return False
-    if any(x in t for x in ["hire me", "open to work", "open for work", "available for work"]):
+    if any(x in t for x in ["hire me", "open to work", "open for work", "available for work", "book me"]):
         return True
     return None
 
@@ -282,7 +313,7 @@ def _extract_creator_summary(text: str) -> str:
             capture = True
             continue
         if capture:
-            if len(line.split()) <= 6 and not re.search(r"(view|profile|portfolio|posts|timeline)", lower):
+            if len(line.split()) <= 8 and not re.search(r"(view|profile|portfolio|posts|timeline|faq|blog|jobs|talent)", lower):
                 client_section.append(line)
             if len(client_section) >= 8:
                 break
@@ -386,15 +417,14 @@ async def _get_visible_cards(page: Page) -> list[dict]:
     return await page.evaluate(
         """(roleNames) => {
             const roleSet = new Set(roleNames);
-            const minX = 0;
-            const maxX = window.innerWidth * 0.48;
             const cards = [];
+            const maxX = window.innerWidth * 0.52;
 
             const all = Array.from(document.querySelectorAll("body *"));
             for (const el of all) {
                 const rect = el.getBoundingClientRect();
-                if (rect.width < 220 || rect.height < 60) continue;
-                if (rect.x < minX || rect.x > maxX) continue;
+                if (rect.width < 180 || rect.height < 40) continue;
+                if (rect.x > maxX) continue;
                 if (rect.y < 120) continue;
 
                 const text = (el.innerText || el.textContent || "").trim();
@@ -429,7 +459,7 @@ async def _get_visible_cards(page: Page) -> list[dict]:
 
             const dedup = [];
             const seen = new Set();
-            for (const c of cards.sort((a, b) => a.y - b.y)) {
+            for (const c of cards.sort((a, b) => a.y - b.y || a.x - b.x)) {
                 const key = `${c.name}||${c.role}`;
                 if (seen.has(key)) continue;
                 seen.add(key);
@@ -443,10 +473,10 @@ async def _get_visible_cards(page: Page) -> list[dict]:
 
 async def _wait_for_panel(page: Page, clicked_name: str) -> bool:
     checks = [
-        lambda: page.get_by_text("View full profile", exact=False).first.wait_for(timeout=5000),
-        lambda: page.get_by_text("Portfolio", exact=True).first.wait_for(timeout=5000),
-        lambda: page.get_by_text("Hire Me", exact=True).first.wait_for(timeout=5000),
-        lambda: page.get_by_text(clicked_name, exact=True).nth(1).wait_for(timeout=5000),
+        lambda: page.get_by_text("View full profile", exact=False).first.wait_for(timeout=4500),
+        lambda: page.get_by_text("Portfolio", exact=True).first.wait_for(timeout=4500),
+        lambda: page.get_by_text("Hire Me", exact=True).first.wait_for(timeout=4500),
+        lambda: page.get_by_text(clicked_name, exact=True).nth(1).wait_for(timeout=4500),
     ]
     for check in checks:
         try:
@@ -461,14 +491,14 @@ async def _extract_panel_text(page: Page) -> str:
     try:
         panel_text = await page.evaluate(
             """() => {
-                const minX = window.innerWidth * 0.40;
+                const minX = window.innerWidth * 0.42;
                 let bestText = "";
                 let bestLen = 0;
 
                 const all = Array.from(document.querySelectorAll("body *"));
                 for (const el of all) {
                     const rect = el.getBoundingClientRect();
-                    if (rect.x < minX || rect.width < 250 || rect.height < 150) continue;
+                    if (rect.x < minX || rect.width < 250 || rect.height < 120) continue;
                     const text = (el.innerText || el.textContent || "").trim();
                     if (!text) continue;
                     if (text.length > bestLen && (text.includes("Portfolio") || text.includes("Hire Me") || text.includes("Profile"))) {
@@ -514,7 +544,7 @@ async def _extract_panel_profile_link(page: Page) -> str:
 
 
 async def _scrape_clicked_panel(page: Page, card: dict, page_no: int, idx: int) -> TalentRecord | None:
-    click_x = card["x"] + min(card["width"] * 0.82, card["width"] - 20)
+    click_x = card["x"] + min(card["width"] * 0.82, card["width"] - 14)
     click_y = card["y"] + card["height"] / 2
 
     try:
@@ -599,12 +629,12 @@ async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]
         if not rec:
             continue
 
-        if rec.ytjobs_profile_link in seen_links:
+        normalized_link = _normalize_profile_link(rec.ytjobs_profile_link)
+        if normalized_link in seen_links:
             continue
 
-        seen_links.add(rec.ytjobs_profile_link)
+        seen_links.add(normalized_link)
         records.append(rec)
-
         await page.wait_for_timeout(500)
 
     print(f"Directory page {page_no} valid records found: {len(records)}")
@@ -811,12 +841,14 @@ def main() -> None:
 
     created = 0
     skipped_existing = 0
-    used_default_group = 0
     skipped_not_open_for_work = 0
+    skipped_unmapped = 0
     failed = 0
 
     for idx, rec in enumerate(records, start=1):
-        if _normalize_profile_link(rec.ytjobs_profile_link) in existing:
+        normalized_link = _normalize_profile_link(rec.ytjobs_profile_link)
+
+        if normalized_link in existing:
             skipped_existing += 1
             continue
 
@@ -825,15 +857,11 @@ def main() -> None:
             print(f"[{idx}] Skipping not-open-for-work: {rec.name} | open_for_work={rec.open_for_work}")
             continue
 
-        mapped_group_id = ROLE_TO_GROUP_ID.get(rec.job_role or "")
-        group_id = mapped_group_id or MONDAY_DEFAULT_GROUP_ID
-
-        if not mapped_group_id:
-            used_default_group += 1
-            print(
-                f"[{idx}] Role not mapped; using default group '{MONDAY_DEFAULT_GROUP_ID}': "
-                f"{rec.name} | role={rec.job_role}"
-            )
+        group_id = ROLE_TO_GROUP_ID.get(rec.job_role or "")
+        if not group_id:
+            skipped_unmapped += 1
+            print(f"[{idx}] Skipping because role is not mapped to a monday group: {rec.name} | role={rec.job_role}")
+            continue
 
         values = build_column_values(rec)
 
@@ -845,7 +873,7 @@ def main() -> None:
 
         try:
             monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
-            existing.add(_normalize_profile_link(rec.ytjobs_profile_link))
+            existing.add(normalized_link)
             created += 1
             time.sleep(0.2)
         except Exception as e:
@@ -853,7 +881,7 @@ def main() -> None:
             time.sleep(2)
             try:
                 monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
-                existing.add(_normalize_profile_link(rec.ytjobs_profile_link))
+                existing.add(normalized_link)
                 created += 1
                 time.sleep(0.2)
             except Exception as e2:
@@ -865,13 +893,13 @@ def main() -> None:
     print(f"Created monday items: {created}")
     print(f"Skipped existing: {skipped_existing}")
     print(f"Skipped not open for work: {skipped_not_open_for_work}")
-    print(f"Used default group for unmapped/unknown role: {used_default_group}")
+    print(f"Skipped unmapped role: {skipped_unmapped}")
     print(f"Failed: {failed}")
 
     if len(records) > 0 and created == 0:
         print(
             "WARNING: Scrape completed but 0 monday items were created. "
-            "Either all records already existed, were filtered, or monday rejected the writes."
+            "Either all records already existed, were filtered, were unmapped, or monday rejected the writes."
         )
 
 
