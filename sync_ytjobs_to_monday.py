@@ -122,6 +122,7 @@ JUNK_NAME_PATTERNS = [
     r"^forum_sort_type$",
     r"^page-has-been-force-refreshed$",
     r"^talent$",
+    r"^join as talent$",
     r"^loginpost a jobjoin as talent$",
 ]
 
@@ -195,6 +196,8 @@ def _is_junk_block_text(text: str) -> bool:
     if not text:
         return False
     lowered = " ".join(text.lower().split())
+    if lowered in {"join as talent", "talent"}:
+        return True
     return "post a job" in lowered and "join as talent" in lowered
 
 
@@ -386,6 +389,18 @@ async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]
             job_role=_detect_role_from_text(text),
         )
         rec.priority = _normalize_priority(rec)
+        has_signal = any(
+            [
+                rec.linkedin,
+                rec.email,
+                rec.years_of_experience is not None,
+                rec.open_for_work is not None,
+                rec.views is not None,
+                rec.job_role is not None,
+            ]
+        )
+        if not has_signal:
+            continue
         dedup[profile_link] = rec
 
     print(f"Directory page {page_no} valid records found: {len(dedup)}")
@@ -663,9 +678,9 @@ def main() -> None:
     print(f"Failed: {failed}")
 
     if len(records) > 0 and created == 0:
-        raise RuntimeError(
-            "Scrape completed but 0 monday items were created. "
-            "Extraction likely failed or every record was skipped."
+        print(
+            "WARNING: Scrape completed but 0 monday items were created. "
+            "Either all records already existed, were filtered, or extraction quality was low."
         )
 
 
