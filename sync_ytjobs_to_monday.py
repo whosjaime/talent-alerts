@@ -121,6 +121,8 @@ JUNK_NAME_PATTERNS = [
     r"^termly",
     r"^forum_sort_type$",
     r"^page-has-been-force-refreshed$",
+    r"^talent$",
+    r"^loginpost a jobjoin as talent$",
 ]
 
 PROFILE_PATTERNS = [
@@ -187,6 +189,13 @@ def _is_junk_name(name: str) -> bool:
         return True
     lowered = name.strip().lower()
     return any(re.search(p, lowered) for p in JUNK_NAME_PATTERNS)
+
+
+def _is_junk_block_text(text: str) -> bool:
+    if not text:
+        return False
+    lowered = " ".join(text.lower().split())
+    return "post a job" in lowered and "join as talent" in lowered
 
 
 def _normalize_role(raw: str | None) -> str | None:
@@ -347,6 +356,8 @@ async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]
     dedup = {}
     for row in raw:
         text = (row.get("text", "") or "").strip()
+        if _is_junk_block_text(text):
+            continue
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         if not lines:
             continue
@@ -558,11 +569,18 @@ def parse_args() -> argparse.Namespace:
     env_max_pages = int(os.getenv("MAX_PAGES", "1000"))
     env_headless = os.getenv("HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
     env_dry_run = os.getenv("DRY_RUN", "false").strip().lower() in {"1", "true", "yes"}
+    env_open_for_work_only = os.getenv("OPEN_FOR_WORK_ONLY", "false").strip().lower() in {"1", "true", "yes"}
 
     parser = argparse.ArgumentParser(description="Scrape YTJobs talent and sync to monday.com")
     parser.add_argument("--max-pages", type=int, default=env_max_pages)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=env_headless)
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=env_dry_run)
+    parser.add_argument(
+        "--open-for-work-only",
+        action=argparse.BooleanOptionalAction,
+        default=env_open_for_work_only,
+        help="Only create monday leads for profiles explicitly marked open for work.",
+    )
     return parser.parse_args()
 
 
@@ -592,11 +610,17 @@ def main() -> None:
     created = 0
     skipped_existing = 0
     used_default_group = 0
+    skipped_not_open_for_work = 0
     failed = 0
 
     for idx, rec in enumerate(records, start=1):
         if rec.ytjobs_profile_link in existing:
             skipped_existing += 1
+            continue
+
+        if args.open_for_work_only and rec.open_for_work is not True:
+            skipped_not_open_for_work += 1
+            print(f"[{idx}] Skipping not-open-for-work: {rec.name} | open_for_work={rec.open_for_work}")
             continue
 
         mapped_group_id = ROLE_TO_GROUP_ID.get(rec.job_role or "")
@@ -634,6 +658,7 @@ def main() -> None:
     print(f"Total scraped valid records: {len(records)}")
     print(f"Created monday items: {created}")
     print(f"Skipped existing: {skipped_existing}")
+    print(f"Skipped not open for work: {skipped_not_open_for_work}")
     print(f"Used default group for unmapped/unknown role: {used_default_group}")
     print(f"Failed: {failed}")
 
