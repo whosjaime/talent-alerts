@@ -33,8 +33,6 @@ def _env_int(name: str, default: int) -> int:
 MONDAY_BOARD_ID = _env_int("MONDAY_BOARD_ID", 18406893281)
 MONDAY_DEFAULT_GROUP_ID = os.getenv("MONDAY_DEFAULT_GROUP_ID", "topics")
 
-# Role groups can be overridden by environment variables.
-# Leave a value blank to route that role to MONDAY_DEFAULT_GROUP_ID.
 ROLE_TO_GROUP_ID = {
     "Channel Manager": os.getenv("MONDAY_GROUP_CHANNEL_MANAGER", "group_mm1v3xqy"),
     "Strategist": os.getenv("MONDAY_GROUP_STRATEGIST", "group_mm1vazt5"),
@@ -55,23 +53,17 @@ ROLE_TO_GROUP_ID = {
 }
 
 MONDAY_COLUMNS = {
-    "linkedin": "text_mm20d7rp",
-    "ytjobs_profile_link": "text_mm20a03h",
-    "email": "text_mm2028sd",
-    "years_of_experience": "numeric_mm20gyp",
-    "priority": "color_mm204cwh",
-    "open_for_work": "boolean_mm20xkyn",
-    "creators_worked_with": "dropdown_mm20xxmt",
-    "views": "numeric_mm20rjas",
-    "job_role": "dropdown_mm22xt4g",
-}
-
-# Only these can be written to the "Creators Worked With" dropdown
-VALID_CREATOR_LABELS = {
-    "Editors",
-    "Thumbnail Designers",
-    "Animators",
-    "Scriptwriters",
+    "linkedin": os.getenv("MONDAY_LINKEDIN_COLUMN_ID", "text_mm20d7rp"),
+    "ytjobs_profile_link": os.getenv("MONDAY_YTJOBS_PROFILE_LINK_COLUMN_ID", "text_mm20a03h"),
+    "email": os.getenv("MONDAY_EMAIL_COLUMN_ID", "text_mm2028sd"),
+    "years_of_experience": os.getenv("MONDAY_YOE_COLUMN_ID", "numeric_mm20gyp"),
+    "priority": os.getenv("MONDAY_PRIORITY_COLUMN_ID", "color_mm204cwh"),
+    "open_for_work": os.getenv("MONDAY_OPEN_FOR_WORK_COLUMN_ID", "boolean_mm20xkyn"),
+    "creators_worked_with": os.getenv("MONDAY_CREATORS_WORKED_WITH_COLUMN_ID", "text_mm20xxmt"),
+    "views": os.getenv("MONDAY_VIEWS_COLUMN_ID", "text_mm20rjas"),
+    "job_role": os.getenv("MONDAY_JOB_ROLE_COLUMN_ID", "dropdown_mm22xt4g"),
+    "niche": os.getenv("MONDAY_NICHE_COLUMN_ID", "long_text_mm26cehz"),
+    "socials": os.getenv("MONDAY_SOCIALS_COLUMN_ID", "link_mm26njaz"),
 }
 
 ROLE_ALIASES = {
@@ -101,6 +93,21 @@ ROLE_ALIASES = {
     "animator": "Animator",
     "content creator": "Content Creator",
     "creator": "Content Creator",
+}
+
+NICHE_KEYWORDS = {
+    "Gaming": ["gaming", "fortnite", "minecraft", "warzone", "call of duty", "twitch", "streamer"],
+    "Finance": ["finance", "investing", "stocks", "crypto", "real estate", "money"],
+    "Beauty": ["beauty", "makeup", "skincare", "fashion", "grwm"],
+    "Fitness": ["fitness", "workout", "gym", "bodybuilding", "health"],
+    "Tech": ["tech", "software", "ai", "developer", "gadgets", "coding"],
+    "Business": ["business", "entrepreneur", "marketing", "sales", "startup"],
+    "Education": ["education", "tutorial", "explainer", "teaching", "course"],
+    "Podcast": ["podcast", "interview", "conversation"],
+    "Food": ["food", "cooking", "recipe", "chef"],
+    "Lifestyle": ["lifestyle", "vlog", "travel", "daily life"],
+    "Commentary": ["commentary", "reaction", "drama", "internet culture"],
+    "Entertainment": ["challenge", "prank", "comedy", "entertainment", "viral"],
 }
 
 JUNK_NAME_PATTERNS = [
@@ -140,11 +147,13 @@ class TalentRecord:
     email: str = ""
     years_of_experience: float | None = None
     open_for_work: bool | None = None
-    creators_worked_with: list[str] | None = None
-    creator_summary: str = ""
-    views: float | None = None
+    creators_worked_with: str = ""
+    views: str = ""
     priority: str | None = None
     job_role: str | None = None
+    niche: str = ""
+    twitter: str = ""
+    youtube: str = ""
 
 
 def _to_absolute(url: str) -> str:
@@ -207,51 +216,53 @@ def _normalize_role(raw: str | None) -> str | None:
     role = re.sub(r"\s+", " ", raw.strip().lower())
     if role in ROLE_ALIASES:
         return ROLE_ALIASES[role]
-    for alias, canonical in ROLE_ALIASES.items():
+    for alias, canonical in sorted(ROLE_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
         if alias in role:
             return canonical
     return None
 
 
 def _detect_role_from_text(text: str) -> str | None:
-    if not text:
-        return None
-    lowered = text.lower()
-    for alias, canonical in sorted(ROLE_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
-        if alias in lowered:
-            return canonical
-    return None
+    return _normalize_role(text)
 
 
-def _detect_open_to_work(text: str) -> bool | None:
+def _detect_open_to_work_text(text: str) -> bool | None:
     if not text:
         return None
     t = text.lower()
+
     if any(x in t for x in ["not available", "unavailable", "not open for work"]):
         return False
-    if any(x in t for x in ["open to work", "open for work", "hire me", "available for work"]):
+
+    if any(x in t for x in ["hire me", "open to work", "open for work", "available for work"]):
         return True
+
     return None
 
 
-def _extract_views(text: str) -> float | None:
+def _extract_views_text(text: str) -> str:
     if not text:
-        return None
+        return ""
     patterns = [
         r"(\d+(?:\.\d+)?)\s*([kmb])?\s+views",
         r"views\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([kmb])?",
     ]
-    lowered = text.lower()
     for pattern in patterns:
-        m = re.search(pattern, lowered, re.I)
+        m = re.search(pattern, text, re.I)
         if m:
-            return _extract_num(f"{m.group(1)}{m.group(2) or ''}")
-    return None
+            num = m.group(1)
+            suffix = (m.group(2) or "").upper()
+            return f"{num}{suffix} Views".strip()
+    return ""
 
 
 def _extract_creator_summary(text: str) -> str:
     if not text:
         return ""
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    chunks = []
+
     patterns = [
         r"(worked with[^\n]+)",
         r"(clients?[^\n]+)",
@@ -259,53 +270,96 @@ def _extract_creator_summary(text: str) -> str:
         r"(experience[^\n]+)",
         r"(past work[^\n]+)",
     ]
-    chunks = []
     for pattern in patterns:
         for m in re.finditer(pattern, text, re.I):
-            chunk = m.group(1).strip()
+            chunk = " ".join(m.group(1).split())
             if chunk and chunk not in chunks:
                 chunks.append(chunk)
+
+    client_section = []
+    capture = False
+    for line in lines:
+        lower = line.lower()
+        if lower in {"clients", "verified clients"} or "clients" == lower:
+            capture = True
+            continue
+        if capture:
+            if len(line.split()) <= 6 and not re.search(r"(view|profile|portfolio|posts|timeline)", lower):
+                client_section.append(line)
+            if len(client_section) >= 8:
+                break
+
+    if client_section:
+        client_text = ", ".join(dict.fromkeys(client_section))
+        if client_text not in chunks:
+            chunks.append(client_text)
+
     return " | ".join(chunks[:5])
 
 
-def _extract_creators_dropdown(text: str) -> list[str] | None:
+def _extract_niche(text: str) -> str:
     if not text:
-        return None
+        return ""
     lowered = text.lower()
-    found = []
-    mapping = {
-        "editor": "Editors",
-        "thumbnail designer": "Thumbnail Designers",
-        "animator": "Animators",
-        "scriptwriter": "Scriptwriters",
-    }
-    for needle, label in mapping.items():
-        if needle in lowered and label not in found:
-            found.append(label)
-    return found or None
+    scores = {}
+
+    for niche, keywords in NICHE_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in lowered)
+        if score:
+            scores[niche] = score
+
+    if not scores:
+        return ""
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    top = [name for name, _ in ranked[:3]]
+    return ", ".join(top)
+
+
+def _extract_social_links(text: str) -> tuple[str, str, str]:
+    linkedin = ""
+    twitter = ""
+    youtube = ""
+
+    m = re.search(r"https?://(?:www\.)?linkedin\.com/[^\s)>\]]+", text, re.I)
+    if m:
+        linkedin = m.group(0).rstrip(".,)")
+
+    twitter_patterns = [
+        r"https?://(?:www\.)?(?:twitter\.com|x\.com)/[A-Za-z0-9_]+",
+        r"@[A-Za-z0-9_]{2,}",
+    ]
+    for pattern in twitter_patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            raw = m.group(0).rstrip(".,)")
+            if raw.startswith("@"):
+                twitter = f"https://x.com/{raw[1:]}"
+            else:
+                twitter = raw
+            break
+
+    youtube_patterns = [
+        r"https?://(?:www\.)?youtube\.com/[^\s)>\]]+",
+        r"https?://youtu\.be/[^\s)>\]]+",
+    ]
+    for pattern in youtube_patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            youtube = m.group(0).rstrip(".,)")
+            break
+
+    return linkedin, twitter, youtube
 
 
 def _normalize_priority(rec: TalentRecord) -> str:
+    if rec.open_for_work is True and rec.email:
+        return "Critical"
     if rec.open_for_work is True:
-        return "Critical ⚠️️"
-
-    score = 0
-    if rec.email:
-        score += 1
-    if rec.linkedin:
-        score += 1
-    if rec.years_of_experience is not None and rec.years_of_experience >= 5:
-        score += 1
-    if rec.views is not None and rec.views >= 100000:
-        score += 1
-
-    if score >= 4:
-        return "Critical ⚠️️"
-    if score == 3:
         return "High"
-    if score == 2:
-        return "Medium"
-    return "Low"
+    if rec.open_for_work is False:
+        return "Low"
+    return "Medium"
 
 
 def _pick_profile_link(href: str, nested_links: list[str]) -> str:
@@ -314,6 +368,53 @@ def _pick_profile_link(href: str, nested_links: list[str]) -> str:
         if _looks_like_valid_profile_url(absolute):
             return absolute
     return ""
+
+
+def _pick_primary_social(rec: TalentRecord) -> str:
+    if rec.linkedin:
+        return rec.linkedin
+    if rec.twitter:
+        return rec.twitter
+    if rec.youtube:
+        return rec.youtube
+    return rec.ytjobs_profile_link
+
+
+async def _detect_open_to_work_from_page(page: Page, body_text: str) -> bool | None:
+    try:
+        hire_button = await page.locator("text=Hire Me").count()
+        if hire_button > 0:
+            return True
+    except Exception:
+        pass
+
+    try:
+        avatar_badge = await page.evaluate(
+            """
+            () => {
+              const all = Array.from(document.querySelectorAll('*'));
+              for (const el of all) {
+                const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                if (text.includes('hire me')) return true;
+
+                const cls = (el.className && typeof el.className === 'string') ? el.className.toLowerCase() : '';
+                const aria = (el.getAttribute && (el.getAttribute('aria-label') || '') || '').toLowerCase();
+                const alt = (el.getAttribute && (el.getAttribute('alt') || '') || '').toLowerCase();
+
+                if (cls.includes('hire') || cls.includes('open') || aria.includes('hire me') || alt.includes('hire me')) {
+                  return true;
+                }
+              }
+              return false;
+            }
+            """
+        )
+        if avatar_badge:
+            return True
+    except Exception:
+        pass
+
+    return _detect_open_to_work_text(body_text)
 
 
 async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]:
@@ -361,6 +462,7 @@ async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]
         text = (row.get("text", "") or "").strip()
         if _is_junk_block_text(text):
             continue
+
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         if not lines:
             continue
@@ -373,34 +475,39 @@ async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]
         if not profile_link:
             continue
 
-        linkedin_match = re.search(r"https?://(?:www\.)?linkedin\.com/[^\s]+", text, re.I)
-        email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, re.I)
+        linkedin, twitter, youtube = _extract_social_links(text)
 
         rec = TalentRecord(
             name=name,
             ytjobs_profile_link=profile_link,
-            linkedin=linkedin_match.group(0) if linkedin_match else "",
-            email=email_match.group(0) if email_match else "",
+            linkedin=linkedin,
+            email="",
             years_of_experience=_extract_num(text) if "year" in text.lower() else None,
-            open_for_work=_detect_open_to_work(text),
-            creators_worked_with=_extract_creators_dropdown(text),
-            creator_summary=_extract_creator_summary(text),
-            views=_extract_views(text),
+            open_for_work=_detect_open_to_work_text(text),
+            creators_worked_with=_extract_creator_summary(text),
+            views=_extract_views_text(text),
+            priority=None,
             job_role=_detect_role_from_text(text),
+            niche=_extract_niche(text),
+            twitter=twitter,
+            youtube=youtube,
         )
         rec.priority = _normalize_priority(rec)
+
         has_signal = any(
             [
                 rec.linkedin,
-                rec.email,
                 rec.years_of_experience is not None,
                 rec.open_for_work is not None,
-                rec.views is not None,
+                rec.views,
                 rec.job_role is not None,
+                rec.niche,
+                rec.creators_worked_with,
             ]
         )
         if not has_signal:
             continue
+
         dedup[profile_link] = rec
 
     print(f"Directory page {page_no} valid records found: {len(dedup)}")
@@ -411,44 +518,51 @@ async def _enrich_profile(page: Page, rec: TalentRecord) -> TalentRecord:
     try:
         await page.goto(rec.ytjobs_profile_link, wait_until="domcontentloaded", timeout=90000)
         await page.wait_for_timeout(1800)
-    except Exception:
+    except Exception as e:
+        print(f"Profile load failed for {rec.name}: {e}")
         return rec
 
     body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
     body_text = body_text or ""
 
+    page_content = await page.content()
+
     if not rec.job_role:
         rec.job_role = _detect_role_from_text(body_text)
 
-    profile_views = _extract_views(body_text)
-    if profile_views is not None:
-        rec.views = profile_views
+    open_from_page = await _detect_open_to_work_from_page(page, body_text)
+    if open_from_page is not None:
+        rec.open_for_work = open_from_page
 
-    if rec.open_for_work is None:
-        rec.open_for_work = _detect_open_to_work(body_text)
-
-    creators_dropdown = _extract_creators_dropdown(body_text)
-    if creators_dropdown:
-        rec.creators_worked_with = creators_dropdown
+    views_text = _extract_views_text(body_text)
+    if views_text:
+        rec.views = views_text
 
     creator_summary = _extract_creator_summary(body_text)
     if creator_summary:
-        rec.creator_summary = creator_summary
+        rec.creators_worked_with = creator_summary
+
+    if not rec.niche:
+        rec.niche = _extract_niche(body_text)
 
     if rec.years_of_experience is None:
         m = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*years", body_text.lower())
         if m:
             rec.years_of_experience = _extract_num(m.group(1))
 
-    if not rec.linkedin:
-        m = re.search(r"https?://(?:www\.)?linkedin\.com/[^\s]+", body_text, re.I)
-        if m:
-            rec.linkedin = m.group(0)
+    linkedin, twitter, youtube = _extract_social_links(body_text + "\n" + page_content)
 
-    if not rec.email:
-        m = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", body_text, re.I)
-        if m:
-            rec.email = m.group(0)
+    if not rec.linkedin and linkedin:
+        rec.linkedin = linkedin
+    if not rec.twitter and twitter:
+        rec.twitter = twitter
+    if not rec.youtube and youtube:
+        rec.youtube = youtube
+
+    email_matches = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", body_text, re.I)
+    public_emails = [e for e in email_matches if "private" not in body_text.lower()]
+    if not rec.email and public_emails:
+        rec.email = public_emails[0]
 
     rec.priority = _normalize_priority(rec)
     return rec
@@ -459,22 +573,28 @@ class MondayClient:
         self.client = httpx.Client(
             base_url="https://api.monday.com/v2",
             headers={"Authorization": token, "Content-Type": "application/json"},
-            timeout=30.0,
+            timeout=60.0,
         )
 
     def _post(self, query: str, variables: dict | None = None) -> dict:
-        r = self.client.post("", json={"query": query, "variables": variables or {}})
+        payload = {"query": query, "variables": variables or {}}
+        r = self.client.post("", json=payload)
+        print("MONDAY STATUS:", r.status_code)
+        if r.status_code >= 400:
+            print("MONDAY RESPONSE:", r.text)
         r.raise_for_status()
+
         body = r.json()
         if body.get("errors"):
+            print("MONDAY ERRORS:", json.dumps(body["errors"], ensure_ascii=False))
             raise RuntimeError(f"monday API error: {body['errors']}")
         return body["data"]
 
     def get_existing_profile_links(self, board_id: int, ytjobs_column_id: str) -> set[str]:
-        query = """
-        query ($board_id: [ID!], $cursor: String) {
-          boards (ids: $board_id) {
-            items_page(limit: 500, cursor: $cursor) {
+        first_query = """
+        query ($board_id: [ID!]) {
+          boards(ids: $board_id) {
+            items_page(limit: 500) {
               cursor
               items {
                 column_values(ids: ["YTJOBS_COL"]) {
@@ -486,20 +606,43 @@ class MondayClient:
         }
         """.replace("YTJOBS_COL", ytjobs_column_id)
 
-        cursor = None
+        next_query = """
+        query ($cursor: String!) {
+          next_items_page(limit: 500, cursor: $cursor) {
+            cursor
+            items {
+              column_values(ids: ["YTJOBS_COL"]) {
+                text
+              }
+            }
+          }
+        }
+        """.replace("YTJOBS_COL", ytjobs_column_id)
+
         results = set()
+
+        data = self._post(first_query, {"board_id": [str(board_id)]})
+        boards = data.get("boards", [])
+        if not boards:
+            return results
+
+        page = boards[0]["items_page"]
+
         while True:
-            data = self._post(query, {"board_id": board_id, "cursor": cursor})
-            page = data["boards"][0]["items_page"]
             for item in page["items"]:
                 if not item["column_values"]:
                     continue
                 val = item["column_values"][0].get("text")
                 if val:
                     results.add(_normalize_profile_link(val))
+
             cursor = page.get("cursor")
             if not cursor:
                 break
+
+            data = self._post(next_query, {"cursor": cursor})
+            page = data["next_items_page"]
+
         return results
 
     def create_item(self, board_id: int, group_id: str, item_name: str, column_values: dict) -> None:
@@ -523,9 +666,12 @@ class MondayClient:
 
 def build_column_values(rec: TalentRecord) -> dict:
     vals = {
-        MONDAY_COLUMNS["linkedin"]: rec.linkedin,
-        MONDAY_COLUMNS["ytjobs_profile_link"]: rec.ytjobs_profile_link,
-        MONDAY_COLUMNS["email"]: rec.email,
+        MONDAY_COLUMNS["linkedin"]: rec.linkedin or "",
+        MONDAY_COLUMNS["ytjobs_profile_link"]: rec.ytjobs_profile_link or "",
+        MONDAY_COLUMNS["email"]: rec.email or "",
+        MONDAY_COLUMNS["creators_worked_with"]: rec.creators_worked_with or "",
+        MONDAY_COLUMNS["views"]: rec.views or "",
+        MONDAY_COLUMNS["niche"]: rec.niche or "",
     }
 
     if rec.years_of_experience is not None:
@@ -534,17 +680,15 @@ def build_column_values(rec: TalentRecord) -> dict:
     if rec.open_for_work is not None:
         vals[MONDAY_COLUMNS["open_for_work"]] = rec.open_for_work
 
-    if rec.creators_worked_with:
-        vals[MONDAY_COLUMNS["creators_worked_with"]] = {"labels": rec.creators_worked_with}
-
-    if rec.views is not None:
-        vals[MONDAY_COLUMNS["views"]] = rec.views
-
     if rec.priority:
         vals[MONDAY_COLUMNS["priority"]] = {"label": rec.priority}
 
     if rec.job_role:
         vals[MONDAY_COLUMNS["job_role"]] = {"labels": [rec.job_role]}
+
+    social_url = _pick_primary_social(rec)
+    if social_url:
+        vals[MONDAY_COLUMNS["socials"]] = {"url": social_url, "text": "Profile"}
 
     return vals
 
@@ -566,8 +710,17 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
 
             enriched = []
             for idx, rec in enumerate(records, start=1):
-                print(f"  Enriching profile {idx}/{len(records)}: {rec.name}")
-                enriched.append(await _enrich_profile(profile_page, rec))
+                needs_enrichment = (
+                    not rec.job_role
+                    or not rec.views
+                    or not rec.creators_worked_with
+                    or rec.open_for_work is None
+                    or not rec.niche
+                )
+                if needs_enrichment:
+                    print(f"  Enriching profile {idx}/{len(records)}: {rec.name}")
+                    rec = await _enrich_profile(profile_page, rec)
+                enriched.append(rec)
 
             all_records.extend(enriched)
 
@@ -581,7 +734,7 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
 
 
 def parse_args() -> argparse.Namespace:
-    env_max_pages = int(os.getenv("MAX_PAGES", "1000"))
+    env_max_pages = int(os.getenv("MAX_PAGES", "100"))
     env_headless = os.getenv("HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
     env_dry_run = os.getenv("DRY_RUN", "false").strip().lower() in {"1", "true", "yes"}
     env_open_for_work_only = os.getenv("OPEN_FOR_WORK_ONLY", "false").strip().lower() in {"1", "true", "yes"}
@@ -640,24 +793,27 @@ def main() -> None:
 
         mapped_group_id = ROLE_TO_GROUP_ID.get(rec.job_role or "")
         group_id = mapped_group_id or MONDAY_DEFAULT_GROUP_ID
+
         if not mapped_group_id:
             used_default_group += 1
             print(
                 f"[{idx}] Role not mapped; using default group '{MONDAY_DEFAULT_GROUP_ID}': "
                 f"{rec.name} | role={rec.job_role}"
             )
+
         values = build_column_values(rec)
 
         print(
             f"[{idx}] Creating: {rec.name} | role={rec.job_role} | "
-            f"group={group_id} | views={rec.views} | open_to_work={rec.open_for_work} | "
-            f"creators_summary={rec.creator_summary}"
+            f"group={group_id} | open_for_work={rec.open_for_work} | "
+            f"priority={rec.priority} | niche={rec.niche} | views={rec.views}"
         )
 
         try:
             monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
             existing.add(rec.ytjobs_profile_link)
             created += 1
+            time.sleep(0.2)
         except Exception as e:
             print(f"[{idx}] First attempt failed for {rec.name}: {e}")
             time.sleep(2)
@@ -665,6 +821,7 @@ def main() -> None:
                 monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
                 existing.add(rec.ytjobs_profile_link)
                 created += 1
+                time.sleep(0.2)
             except Exception as e2:
                 failed += 1
                 print(f"[{idx}] Failed permanently for {rec.name}: {e2}")
@@ -680,7 +837,7 @@ def main() -> None:
     if len(records) > 0 and created == 0:
         print(
             "WARNING: Scrape completed but 0 monday items were created. "
-            "Either all records already existed, were filtered, or extraction quality was low."
+            "Either all records already existed, were filtered, or monday rejected the writes."
         )
 
 
