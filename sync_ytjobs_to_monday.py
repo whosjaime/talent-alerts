@@ -749,8 +749,10 @@ def build_column_values(rec: TalentRecord) -> dict:
     if rec.years_of_experience is not None:
         vals[MONDAY_COLUMNS["years_of_experience"]] = rec.years_of_experience
 
-    if rec.open_for_work is not None:
-        vals[MONDAY_COLUMNS["open_for_work"]] = rec.open_for_work
+    if rec.open_for_work is True:
+        vals[MONDAY_COLUMNS["open_for_work"]] = {"checked": True}
+    elif rec.open_for_work is False:
+        vals[MONDAY_COLUMNS["open_for_work"]] = {"checked": False}
 
     if rec.priority:
         vals[MONDAY_COLUMNS["priority"]] = {"label": rec.priority}
