@@ -69,6 +69,7 @@ MONDAY_COLUMNS = {
 ROLE_ALIASES = {
     "channel manager": "Channel Manager",
     "strategist": "Strategist",
+    "youtube strategist": "Strategist",
     "content strategist": "Strategist",
     "producer": "Producer",
     "creative director": "Creative Director",
@@ -93,6 +94,25 @@ ROLE_ALIASES = {
     "animator": "Animator",
     "content creator": "Content Creator",
     "creator": "Content Creator",
+}
+
+DISPLAY_ROLE_ALIASES = {
+    "Channel Manager": "Channel Manager",
+    "Creative Director": "Creative Director",
+    "Video Editor": "Long-Form Editor",
+    "Lead Editor": "Lead Editor",
+    "Thumbnail Designer": "Thumbnail Designer",
+    "YouTube Strategist": "Strategist",
+    "Strategist": "Strategist",
+    "Producer": "Producer",
+    "Scriptwriter": "Scriptwriter",
+    "Personal Assistant": "Personal Assistant",
+    "Engineer": "Engineer",
+    "Developer": "Developer",
+    "Graphic Designer": "Graphic Designer",
+    "Operations": "Operations",
+    "Animator": "Animator",
+    "Content Creator": "Content Creator",
 }
 
 NICHE_KEYWORDS = {
@@ -133,11 +153,6 @@ JUNK_NAME_PATTERNS = [
     r"^loginpost a jobjoin as talent$",
 ]
 
-PROFILE_PATTERNS = [
-    re.compile(r"^https://ytjobs\.co/talent/[^/?#]+/?$", re.I),
-    re.compile(r"^https://ytjobs\.co/profile/[^/?#]+/?$", re.I),
-]
-
 
 @dataclass
 class TalentRecord:
@@ -163,17 +178,12 @@ def _to_absolute(url: str) -> str:
         return url
     if url.startswith("/"):
         return f"{YTJOBS_BASE}{url}"
-    return url
+    return urljoin(YTJOBS_BASE, url)
 
 
 def _normalize_profile_link(url: str) -> str:
     absolute = _to_absolute(url).strip()
     return absolute.rstrip("/")
-
-
-def _looks_like_valid_profile_url(url: str) -> bool:
-    absolute = _normalize_profile_link(url)
-    return any(p.match(absolute) for p in PROFILE_PATTERNS)
 
 
 def _extract_num(text: str) -> float | None:
@@ -201,15 +211,6 @@ def _is_junk_name(name: str) -> bool:
     return any(re.search(p, lowered) for p in JUNK_NAME_PATTERNS)
 
 
-def _is_junk_block_text(text: str) -> bool:
-    if not text:
-        return False
-    lowered = " ".join(text.lower().split())
-    if lowered in {"join as talent", "talent"}:
-        return True
-    return "post a job" in lowered and "join as talent" in lowered
-
-
 def _normalize_role(raw: str | None) -> str | None:
     if not raw:
         return None
@@ -230,13 +231,10 @@ def _detect_open_to_work_text(text: str) -> bool | None:
     if not text:
         return None
     t = text.lower()
-
     if any(x in t for x in ["not available", "unavailable", "not open for work"]):
         return False
-
     if any(x in t for x in ["hire me", "open to work", "open for work", "available for work"]):
         return True
-
     return None
 
 
@@ -261,7 +259,7 @@ def _extract_creator_summary(text: str) -> str:
         return ""
 
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    chunks = []
+    chunks: list[str] = []
 
     patterns = [
         r"(worked with[^\n]+)",
@@ -280,7 +278,7 @@ def _extract_creator_summary(text: str) -> str:
     capture = False
     for line in lines:
         lower = line.lower()
-        if lower in {"clients", "verified clients"} or "clients" == lower:
+        if lower in {"clients", "verified clients"} or lower == "clients":
             capture = True
             continue
         if capture:
@@ -333,10 +331,7 @@ def _extract_social_links(text: str) -> tuple[str, str, str]:
         m = re.search(pattern, text, re.I)
         if m:
             raw = m.group(0).rstrip(".,)")
-            if raw.startswith("@"):
-                twitter = f"https://x.com/{raw[1:]}"
-            else:
-                twitter = raw
+            twitter = f"https://x.com/{raw[1:]}" if raw.startswith("@") else raw
             break
 
     youtube_patterns = [
@@ -362,14 +357,6 @@ def _normalize_priority(rec: TalentRecord) -> str:
     return "Medium"
 
 
-def _pick_profile_link(href: str, nested_links: list[str]) -> str:
-    for candidate in [href] + (nested_links or []):
-        absolute = _normalize_profile_link(candidate)
-        if _looks_like_valid_profile_url(absolute):
-            return absolute
-    return ""
-
-
 def _pick_primary_social(rec: TalentRecord) -> str:
     if rec.linkedin:
         return rec.linkedin
@@ -380,204 +367,248 @@ def _pick_primary_social(rec: TalentRecord) -> str:
     return rec.ytjobs_profile_link
 
 
-async def _detect_open_to_work_from_page(page: Page, body_text: str) -> bool | None:
-    try:
-        hire_button = await page.locator("text=Hire Me").count()
-        if hire_button > 0:
-            return True
-    except Exception:
-        pass
+async def _accept_cookies(page: Page) -> None:
+    possible_texts = ["Accept", "I Accept", "Accept All", "Allow all"]
+    for txt in possible_texts:
+        try:
+            btn = page.get_by_text(txt, exact=True).first
+            if await btn.count() > 0:
+                await btn.click(timeout=2500)
+                await page.wait_for_timeout(1200)
+                print("Accepted cookie banner.")
+                return
+        except Exception:
+            pass
 
-    try:
-        avatar_badge = await page.evaluate(
-            """
-            () => {
-              const all = Array.from(document.querySelectorAll('*'));
-              for (const el of all) {
-                const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-                if (text.includes('hire me')) return true;
 
-                const cls = (el.className && typeof el.className === 'string') ? el.className.toLowerCase() : '';
-                const aria = (el.getAttribute && (el.getAttribute('aria-label') || '') || '').toLowerCase();
-                const alt = (el.getAttribute && (el.getAttribute('alt') || '') || '').toLowerCase();
+async def _get_visible_cards(page: Page) -> list[dict]:
+    role_names = list(DISPLAY_ROLE_ALIASES.keys())
+    return await page.evaluate(
+        """(roleNames) => {
+            const roleSet = new Set(roleNames);
+            const minX = 0;
+            const maxX = window.innerWidth * 0.48;
+            const cards = [];
 
-                if (cls.includes('hire') || cls.includes('open') || aria.includes('hire me') || alt.includes('hire me')) {
-                  return true;
+            const all = Array.from(document.querySelectorAll("body *"));
+            for (const el of all) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 220 || rect.height < 60) continue;
+                if (rect.x < minX || rect.x > maxX) continue;
+                if (rect.y < 120) continue;
+
+                const text = (el.innerText || el.textContent || "").trim();
+                if (!text) continue;
+
+                const lines = text.split(/\\n+/).map(x => x.trim()).filter(Boolean);
+                if (lines.length < 2) continue;
+
+                let name = "";
+                let role = "";
+
+                for (let i = 0; i < lines.length - 1; i++) {
+                    if (roleSet.has(lines[i + 1])) {
+                        name = lines[i];
+                        role = lines[i + 1];
+                        break;
+                    }
                 }
-              }
-              return false;
+
+                if (!name || !role) continue;
+                if (name.length > 80) continue;
+
+                cards.push({
+                    name,
+                    role,
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height
+                });
             }
-            """
-        )
-        if avatar_badge:
+
+            const dedup = [];
+            const seen = new Set();
+            for (const c of cards.sort((a, b) => a.y - b.y)) {
+                const key = `${c.name}||${c.role}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                dedup.push(c);
+            }
+            return dedup;
+        }""",
+        role_names,
+    )
+
+
+async def _wait_for_panel(page: Page, clicked_name: str) -> bool:
+    checks = [
+        lambda: page.get_by_text("View full profile", exact=False).first.wait_for(timeout=5000),
+        lambda: page.get_by_text("Portfolio", exact=True).first.wait_for(timeout=5000),
+        lambda: page.get_by_text("Hire Me", exact=True).first.wait_for(timeout=5000),
+        lambda: page.get_by_text(clicked_name, exact=True).nth(1).wait_for(timeout=5000),
+    ]
+    for check in checks:
+        try:
+            await check()
             return True
+        except Exception:
+            continue
+    return False
+
+
+async def _extract_panel_text(page: Page) -> str:
+    try:
+        panel_text = await page.evaluate(
+            """() => {
+                const minX = window.innerWidth * 0.40;
+                let bestText = "";
+                let bestLen = 0;
+
+                const all = Array.from(document.querySelectorAll("body *"));
+                for (const el of all) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.x < minX || rect.width < 250 || rect.height < 150) continue;
+                    const text = (el.innerText || el.textContent || "").trim();
+                    if (!text) continue;
+                    if (text.length > bestLen && (text.includes("Portfolio") || text.includes("Hire Me") || text.includes("Profile"))) {
+                        bestText = text;
+                        bestLen = text.length;
+                    }
+                }
+
+                return bestText || (document.body ? document.body.innerText : "");
+            }"""
+        )
+        return panel_text or ""
+    except Exception:
+        try:
+            return await page.locator("body").inner_text()
+        except Exception:
+            return ""
+
+
+async def _extract_panel_profile_link(page: Page) -> str:
+    try:
+        link = page.get_by_text("View full profile", exact=False).first
+        href = await link.get_attribute("href")
+        if href:
+            return _normalize_profile_link(href)
     except Exception:
         pass
 
-    return _detect_open_to_work_text(body_text)
+    try:
+        href = await page.evaluate(
+            """() => {
+                const anchors = Array.from(document.querySelectorAll('a[href]'));
+                const target = anchors.find(a => ((a.innerText || a.textContent || '').toLowerCase().includes('view full profile')));
+                return target ? target.getAttribute('href') : '';
+            }"""
+        )
+        if href:
+            return _normalize_profile_link(href)
+    except Exception:
+        pass
+
+    return ""
+
+
+async def _scrape_clicked_panel(page: Page, card: dict, page_no: int, idx: int) -> TalentRecord | None:
+    click_x = card["x"] + min(card["width"] * 0.82, card["width"] - 20)
+    click_y = card["y"] + card["height"] / 2
+
+    try:
+        await page.mouse.click(click_x, click_y)
+        await page.wait_for_timeout(1400)
+    except Exception as e:
+        print(f"Failed clicking card {card['name']}: {e}")
+        return None
+
+    panel_ready = await _wait_for_panel(page, card["name"])
+    if not panel_ready:
+        print(f"Panel did not open for {card['name']}")
+        return None
+
+    panel_text = await _extract_panel_text(page)
+    page_content = await page.content()
+    profile_link = await _extract_panel_profile_link(page)
+
+    if not profile_link:
+        slug = re.sub(r"[^a-z0-9]+", "-", card["name"].lower()).strip("-")
+        profile_link = f"{SEARCH_URL.format(page=page_no)}#inline-{page_no}-{idx}-{slug}"
+
+    linkedin, twitter, youtube = _extract_social_links(panel_text + "\n" + page_content)
+
+    years = None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*years", panel_text.lower())
+    if m:
+        years = _extract_num(m.group(1))
+
+    email = ""
+    email_matches = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", panel_text, re.I)
+    if email_matches and "private" not in panel_text.lower():
+        email = email_matches[0]
+
+    rec = TalentRecord(
+        name=card["name"],
+        ytjobs_profile_link=profile_link,
+        linkedin=linkedin,
+        email=email,
+        years_of_experience=years,
+        open_for_work=_detect_open_to_work_text(panel_text),
+        creators_worked_with=_extract_creator_summary(panel_text),
+        views=_extract_views_text(panel_text),
+        priority=None,
+        job_role=DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(panel_text) or _normalize_role(card["role"]),
+        niche=_extract_niche(panel_text),
+        twitter=twitter,
+        youtube=youtube,
+    )
+    rec.priority = _normalize_priority(rec)
+    return rec
 
 
 async def _scrape_directory_page(page: Page, page_no: int) -> list[TalentRecord]:
     url = SEARCH_URL.format(page=page_no)
     print(f"Scraping directory page {page_no}: {url}")
+
     await page.goto(url, wait_until="networkidle", timeout=90000)
-    await page.wait_for_timeout(5000)
+    await page.wait_for_timeout(3500)
+    await _accept_cookies(page)
+    await page.wait_for_timeout(1500)
 
-    await page.mouse.wheel(0, 2500)
-    await page.wait_for_timeout(2000)
+    title = await page.title()
+    body_preview = await page.locator("body").inner_text()
+    print("PAGE TITLE:", title)
+    print("BODY PREVIEW:", body_preview[:1000])
 
-    try:
-        title = await page.title()
-        body_preview = await page.locator("body").inner_text()
-        print("PAGE TITLE:", title)
-        print("BODY PREVIEW:", body_preview[:1000])
-    except Exception as e:
-        print("Preview read failed:", e)
+    cards = await _get_visible_cards(page)
+    print(f"Cards detected: {len(cards)}")
+    for c in cards[:10]:
+        print(f"CARD: {c['name']} | {c['role']} | x={c['x']:.0f} y={c['y']:.0f}")
 
-    raw = await page.evaluate(
-        """
-        () => {
-          const selectors = [
-            'article',
-            'li',
-            '[class*="card"]',
-            '[class*="talent"]',
-            '[class*="profile"]'
-          ];
+    records: list[TalentRecord] = []
+    seen_links: set[str] = set()
 
-          const seen = new Set();
-          const blocks = [];
-
-          for (const sel of selectors) {
-            for (const el of document.querySelectorAll(sel)) {
-              if (!seen.has(el)) {
-                seen.add(el);
-                blocks.push(el);
-              }
-            }
-          }
-
-          const rows = [];
-
-          for (const block of blocks) {
-            const text = (block.innerText || block.textContent || '').trim();
-            if (!text) continue;
-
-            const links = Array.from(block.querySelectorAll('a[href]'))
-              .map(a => a.getAttribute('href') || '')
-              .filter(Boolean);
-
-            const profileLink =
-              links.find(x => x.includes('/talent/') || x.includes('/profile/')) || '';
-
-            rows.push({
-              text,
-              href: profileLink,
-              nested_links: links
-            });
-          }
-
-          return rows;
-        }
-        """
-    )
-
-    print(f"Raw candidate blocks found: {len(raw)}")
-
-    dedup = {}
-    for row in raw:
-        text = (row.get("text", "") or "").strip()
-        if _is_junk_block_text(text):
+    for idx, card in enumerate(cards, start=1):
+        if _is_junk_name(card["name"]):
             continue
 
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if len(lines) < 2:
+        print(f"Clicking [{idx}/{len(cards)}]: {card['name']} | {card['role']}")
+        rec = await _scrape_clicked_panel(page, card, page_no, idx)
+        if not rec:
             continue
 
-        name = lines[0]
-        if _is_junk_name(name):
+        if rec.ytjobs_profile_link in seen_links:
             continue
 
-        profile_link = _pick_profile_link(row.get("href", ""), row.get("nested_links", []))
-        if not profile_link:
-            continue
+        seen_links.add(rec.ytjobs_profile_link)
+        records.append(rec)
 
-        linkedin, twitter, youtube = _extract_social_links(text)
+        await page.wait_for_timeout(500)
 
-        rec = TalentRecord(
-            name=name,
-            ytjobs_profile_link=profile_link,
-            linkedin=linkedin,
-            email="",
-            years_of_experience=_extract_num(text) if "year" in text.lower() else None,
-            open_for_work=_detect_open_to_work_text(text),
-            creators_worked_with=_extract_creator_summary(text),
-            views=_extract_views_text(text),
-            priority=None,
-            job_role=_detect_role_from_text(text),
-            niche=_extract_niche(text),
-            twitter=twitter,
-            youtube=youtube,
-        )
-        rec.priority = _normalize_priority(rec)
-        dedup[profile_link] = rec
-
-    print(f"Directory page {page_no} valid records found: {len(dedup)}")
-    return list(dedup.values())
-
-
-async def _enrich_profile(page: Page, rec: TalentRecord) -> TalentRecord:
-    try:
-        await page.goto(rec.ytjobs_profile_link, wait_until="domcontentloaded", timeout=90000)
-        await page.wait_for_timeout(1800)
-    except Exception as e:
-        print(f"Profile load failed for {rec.name}: {e}")
-        return rec
-
-    body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-    body_text = body_text or ""
-
-    page_content = await page.content()
-
-    if not rec.job_role:
-        rec.job_role = _detect_role_from_text(body_text)
-
-    open_from_page = await _detect_open_to_work_from_page(page, body_text)
-    if open_from_page is not None:
-        rec.open_for_work = open_from_page
-
-    views_text = _extract_views_text(body_text)
-    if views_text:
-        rec.views = views_text
-
-    creator_summary = _extract_creator_summary(body_text)
-    if creator_summary:
-        rec.creators_worked_with = creator_summary
-
-    if not rec.niche:
-        rec.niche = _extract_niche(body_text)
-
-    if rec.years_of_experience is None:
-        m = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*years", body_text.lower())
-        if m:
-            rec.years_of_experience = _extract_num(m.group(1))
-
-    linkedin, twitter, youtube = _extract_social_links(body_text + "\n" + page_content)
-
-    if not rec.linkedin and linkedin:
-        rec.linkedin = linkedin
-    if not rec.twitter and twitter:
-        rec.twitter = twitter
-    if not rec.youtube and youtube:
-        rec.youtube = youtube
-
-    email_matches = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", body_text, re.I)
-    public_emails = [e for e in email_matches if "private" not in body_text.lower()]
-    if not rec.email and public_emails:
-        rec.email = public_emails[0]
-
-    rec.priority = _normalize_priority(rec)
-    return rec
+    print(f"Directory page {page_no} valid records found: {len(records)}")
+    return records
 
 
 class MondayClient:
@@ -632,7 +663,6 @@ class MondayClient:
         """.replace("YTJOBS_COL", ytjobs_column_id)
 
         results = set()
-
         data = self._post(first_query, {"board_id": [str(board_id)]})
         boards = data.get("boards", [])
         if not boards:
@@ -708,45 +738,37 @@ def build_column_values(rec: TalentRecord) -> dict:
 async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        ctx = await browser.new_context()
-        directory_page = await ctx.new_page()
-        profile_page = await ctx.new_page()
+        ctx = await browser.new_context(viewport={"width": 1600, "height": 1200})
+        page = await ctx.new_page()
 
-        all_records = []
+        all_records: list[TalentRecord] = []
 
         for page_no in range(1, max_pages + 1):
-            records = await _scrape_directory_page(directory_page, page_no)
+            try:
+                records = await _scrape_directory_page(page, page_no)
+            except Exception as e:
+                print(f"Failed scraping page {page_no}: {e}")
+                continue
+
             if not records:
-                print(f"No valid records found on page {page_no}; stopping scrape.")
-                break
+                print(f"No valid records found on page {page_no}; continuing.")
+                continue
 
-            enriched = []
-            for idx, rec in enumerate(records, start=1):
-                needs_enrichment = (
-                    not rec.job_role
-                    or not rec.views
-                    or not rec.creators_worked_with
-                    or rec.open_for_work is None
-                    or not rec.niche
-                )
-                if needs_enrichment:
-                    print(f"  Enriching profile {idx}/{len(records)}: {rec.name}")
-                    rec = await _enrich_profile(profile_page, rec)
-                enriched.append(rec)
-
-            all_records.extend(enriched)
+            all_records.extend(records)
+            await page.wait_for_timeout(1000)
 
         await browser.close()
 
-    dedup = {}
+    dedup: dict[str, TalentRecord] = {}
     for rec in all_records:
         if rec.ytjobs_profile_link:
             dedup[_normalize_profile_link(rec.ytjobs_profile_link)] = rec
+
     return list(dedup.values())
 
 
 def parse_args() -> argparse.Namespace:
-    env_max_pages = int(os.getenv("MAX_PAGES", "100"))
+    env_max_pages = int(os.getenv("MAX_PAGES", "10"))
     env_headless = os.getenv("HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
     env_dry_run = os.getenv("DRY_RUN", "false").strip().lower() in {"1", "true", "yes"}
     env_open_for_work_only = os.getenv("OPEN_FOR_WORK_ONLY", "false").strip().lower() in {"1", "true", "yes"}
@@ -794,7 +816,7 @@ def main() -> None:
     failed = 0
 
     for idx, rec in enumerate(records, start=1):
-        if rec.ytjobs_profile_link in existing:
+        if _normalize_profile_link(rec.ytjobs_profile_link) in existing:
             skipped_existing += 1
             continue
 
@@ -823,7 +845,7 @@ def main() -> None:
 
         try:
             monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
-            existing.add(rec.ytjobs_profile_link)
+            existing.add(_normalize_profile_link(rec.ytjobs_profile_link))
             created += 1
             time.sleep(0.2)
         except Exception as e:
@@ -831,7 +853,7 @@ def main() -> None:
             time.sleep(2)
             try:
                 monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
-                existing.add(rec.ytjobs_profile_link)
+                existing.add(_normalize_profile_link(rec.ytjobs_profile_link))
                 created += 1
                 time.sleep(0.2)
             except Exception as e2:
