@@ -8,7 +8,7 @@ on:
       max_pages:
         description: "How many pages to scrape"
         required: false
-        default: "1000"
+        default: "100"
       dry_run:
         description: "Dry run (scrape only, no monday writes)"
         required: false
@@ -34,7 +34,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
@@ -45,25 +45,12 @@ jobs:
       - name: Run sync
         env:
           MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
-          MONDAY_BOARD_ID: ${{ secrets.MONDAY_BOARD_ID }}
-          MONDAY_DEFAULT_GROUP_ID: ${{ secrets.MONDAY_DEFAULT_GROUP_ID }}
-          MONDAY_GROUP_CHANNEL_MANAGER: ${{ secrets.MONDAY_GROUP_CHANNEL_MANAGER }}
-          MONDAY_GROUP_STRATEGIST: ${{ secrets.MONDAY_GROUP_STRATEGIST }}
-          MONDAY_GROUP_PRODUCER: ${{ secrets.MONDAY_GROUP_PRODUCER }}
-          MONDAY_GROUP_CREATIVE_DIRECTOR: ${{ secrets.MONDAY_GROUP_CREATIVE_DIRECTOR }}
-          MONDAY_GROUP_LEAD_EDITOR: ${{ secrets.MONDAY_GROUP_LEAD_EDITOR }}
-          MONDAY_GROUP_LONG_FORM_EDITOR: ${{ secrets.MONDAY_GROUP_LONG_FORM_EDITOR }}
-          MONDAY_GROUP_SHORT_FORM_EDITOR: ${{ secrets.MONDAY_GROUP_SHORT_FORM_EDITOR }}
-          MONDAY_GROUP_SCRIPTWRITER: ${{ secrets.MONDAY_GROUP_SCRIPTWRITER }}
-          MONDAY_GROUP_PERSONAL_ASSISTANT: ${{ secrets.MONDAY_GROUP_PERSONAL_ASSISTANT }}
-          MONDAY_GROUP_ENGINEER: ${{ secrets.MONDAY_GROUP_ENGINEER }}
-          MONDAY_GROUP_DEVELOPER: ${{ secrets.MONDAY_GROUP_DEVELOPER }}
-          MONDAY_GROUP_GRAPHIC_DESIGNER: ${{ secrets.MONDAY_GROUP_GRAPHIC_DESIGNER }}
-          MONDAY_GROUP_OPERATIONS: ${{ secrets.MONDAY_GROUP_OPERATIONS }}
-          MONDAY_GROUP_THUMBNAIL_DESIGNER: ${{ secrets.MONDAY_GROUP_THUMBNAIL_DESIGNER }}
-          MONDAY_GROUP_ANIMATOR: ${{ secrets.MONDAY_GROUP_ANIMATOR }}
-          MONDAY_GROUP_CONTENT_CREATOR: ${{ secrets.MONDAY_GROUP_CONTENT_CREATOR }}
-          MAX_PAGES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_pages || '1000' }}
+
+          # Optional overrides if you ever want them later:
+          # MONDAY_BOARD_ID: "18406893281"
+          # MONDAY_DEFAULT_GROUP_ID: "topics"
+
+          MAX_PAGES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_pages || '100' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
           HEADLESS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.headless || 'true' }}
           OPEN_FOR_WORK_ONLY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.open_for_work_only || 'false' }}
