@@ -9,7 +9,7 @@ from dataclasses import dataclass, asdict
 from urllib.parse import urljoin
 
 import httpx
-from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright, Page
 
 YTJOBS_BASE = "https://ytjobs.co"
 SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
@@ -51,7 +51,6 @@ MONDAY_COLUMNS = {
     "ytjobs_profile_link": os.getenv("MONDAY_YTJOBS_PROFILE_LINK_COLUMN_ID", "text_mm20a03h"),
     "email": os.getenv("MONDAY_EMAIL_COLUMN_ID", "text_mm2028sd"),
     "years_of_experience": os.getenv("MONDAY_YOE_COLUMN_ID", "numeric_mm20gyp"),
-    "priority": os.getenv("MONDAY_PRIORITY_COLUMN_ID", "color_mm204cwh"),
     "open_for_work": os.getenv("MONDAY_OPEN_FOR_WORK_COLUMN_ID", "boolean_mm20xkyn"),
     "creators_worked_with": os.getenv("MONDAY_CREATORS_WORKED_WITH_COLUMN_ID", "text_mm20xxmt"),
     "views": os.getenv("MONDAY_VIEWS_COLUMN_ID", "text_mm20rjas"),
@@ -187,7 +186,6 @@ class TalentRecord:
     open_for_work: bool | None = None
     creators_worked_with: str = ""
     views: str = ""
-    priority: str | None = None
     job_role: str | None = None
     niche: str = ""
     twitter: str = ""
@@ -299,27 +297,41 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
     seen = set()
     out = []
     for v in values:
-        if not v:
+        clean = (v or "").strip()
+        if not clean:
             continue
-        key = v.strip().lower()
+        key = clean.lower()
         if key in seen:
             continue
         seen.add(key)
-        out.append(v.strip())
+        out.append(clean)
     return out
 
 
 def _extract_public_email(text: str) -> str:
     if not text:
         return ""
-    matches = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, re.I)
-    filtered = []
-    for email in matches:
-        e = email.strip()
-        if any(x in e.lower() for x in ["example.com", "sentry", "noreply", "no-reply"]):
+
+    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+
+    blocked_exact = {
+        "support@ytjobs.co",
+        "hello@ytjobs.co",
+        "team@ytjobs.co",
+        "info@ytjobs.co",
+    }
+
+    for email in emails:
+        e = email.strip().lower()
+        if e in blocked_exact:
             continue
-        filtered.append(e)
-    return filtered[0] if filtered else ""
+        if "ytjobs.co" in e:
+            continue
+        if "noreply" in e or "no-reply" in e:
+            continue
+        return email.strip()
+
+    return ""
 
 
 def _extract_social_links(text: str) -> tuple[str, str, str]:
@@ -355,16 +367,6 @@ def _extract_social_links(text: str) -> tuple[str, str, str]:
     return linkedin, twitter, youtube
 
 
-def _normalize_priority(rec: TalentRecord) -> str:
-    if rec.open_for_work is True and rec.email:
-        return "Critical"
-    if rec.open_for_work is True:
-        return "High"
-    if rec.open_for_work is False:
-        return "Low"
-    return "Medium"
-
-
 def _pick_primary_social(rec: TalentRecord) -> str:
     if rec.linkedin:
         return rec.linkedin
@@ -380,9 +382,36 @@ def _extract_niche(text: str) -> str:
         return ""
 
     found = []
+    blocked = {
+        "roles",
+        "post a job",
+        "join as talent",
+        "how it works",
+        "login",
+        "sign up",
+        "home",
+        "jobs",
+        "talent",
+        "forum",
+        "feed",
+        "faq",
+        "blog",
+        "profile",
+        "timeline",
+        "posts",
+        "hire me",
+        "book me",
+        "verified clients",
+        "client reviews",
+        "experience",
+        "about",
+        "portfolio",
+        "confirmed info",
+        "open for work",
+    }
 
     category_section_patterns = [
-        r"Categories\s*(.*?)(?:\n[A-Z][^\n]{0,40}:|\nExperience|\nAbout|\nPortfolio|\nVerified Clients|\nClient Reviews|$)",
+        r"Categories\s*(.*?)(?:\nExperience|\nAbout|\nPortfolio|\nVerified Clients|\nClient Reviews|$)",
         r"Category\s*(.*?)(?:\nExperience|\nAbout|\nPortfolio|\nVerified Clients|\nClient Reviews|$)",
     ]
 
@@ -394,15 +423,14 @@ def _extract_niche(text: str) -> str:
         section = m.group(1)
         lines = [ln.strip() for ln in section.splitlines() if ln.strip()]
         for line in lines:
-            if len(line) > 40:
-                continue
             lowered = line.lower()
-            if lowered in {
-                "home", "jobs", "talent", "forum", "feed", "faq", "blog",
-                "verified", "subscribers", "videos", "views", "hire me", "book me"
-            }:
+            if lowered in blocked:
                 continue
-            if re.fullmatch(r"[\d.,]+[mkb]?\s*subscribers?", lowered):
+            if len(line) > 35:
+                continue
+            if re.search(r"post a job|join as talent|login|sign up|how it works", lowered):
+                continue
+            if re.search(r"subscribers?|videos?|views?|verified", lowered):
                 continue
             found.append(line)
 
@@ -436,12 +464,12 @@ def _extract_years_of_experience(text: str) -> float | None:
 
 
 def _clean_creator_line(line: str) -> str:
-    line = re.sub(r"\s+", " ", line).strip()
-    line = re.sub(r"\bVerified\b", "", line, flags=re.I).strip()
-    line = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+subscribers?\b", "", line, flags=re.I).strip()
-    line = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+videos?\b", "", line, flags=re.I).strip()
-    line = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+views?\b", "", line, flags=re.I).strip()
-    return line.strip(" -•|,")
+    clean = re.sub(r"\s+", " ", line).strip()
+    clean = re.sub(r"\bVerified\b", "", clean, flags=re.I).strip()
+    clean = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+subscribers?\b", "", clean, flags=re.I).strip()
+    clean = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+videos?\b", "", clean, flags=re.I).strip()
+    clean = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+views?\b", "", clean, flags=re.I).strip()
+    return clean.strip(" -•|,")
 
 
 def _extract_creator_summary(text: str) -> str:
@@ -460,25 +488,19 @@ def _extract_creator_summary(text: str) -> str:
             lines = [ln.strip() for ln in section.splitlines() if ln.strip()]
             for line in lines:
                 clean = _clean_creator_line(line)
+                lowered = clean.lower()
                 if not clean:
                     continue
-                lowered = clean.lower()
                 if lowered in {
-                    "verified clients", "clients", "client reviews", "vouch",
-                    "portfolio", "about", "experience", "hire me", "book me"
+                    "profile", "timeline", "posts", "verified clients", "clients",
+                    "client reviews", "vouch", "portfolio", "about", "experience"
                 }:
                     continue
                 if len(clean) < 2 or len(clean) > 60:
                     continue
                 if re.search(r"subscribers?|reviews?|vouch|videos?|views?", lowered):
                     continue
-                if clean not in found:
-                    found.append(clean)
-
-    handles = re.findall(r"@([A-Za-z0-9_.]{2,})", text)
-    for h in handles:
-        if h not in found:
-            found.append(h)
+                found.append(clean)
 
     return ", ".join(_dedupe_keep_order(found)[:10])
 
@@ -498,27 +520,27 @@ async def _accept_cookies(page: Page) -> None:
 
 
 async def _wait_for_profile_ready(profile_page: Page) -> None:
-    anchors = [
-        profile_page.get_by_text("About", exact=True).first,
-        profile_page.get_by_text("Experience", exact=True).first,
-        profile_page.get_by_text("Portfolio", exact=True).first,
-        profile_page.get_by_text("Hire Me", exact=True).first,
-    ]
-
     await profile_page.wait_for_load_state("domcontentloaded")
     try:
         await profile_page.wait_for_load_state("networkidle", timeout=10000)
     except Exception:
         pass
 
+    anchors = [
+        profile_page.get_by_text("About", exact=True).first,
+        profile_page.get_by_text("Portfolio", exact=True).first,
+        profile_page.get_by_text("Experience", exact=True).first,
+        profile_page.get_by_text("Hire Me", exact=True).first,
+    ]
+
     for locator in anchors:
         try:
-            await locator.wait_for(timeout=6000)
+            await locator.wait_for(timeout=5000)
             return
         except Exception:
             continue
 
-    await profile_page.wait_for_timeout(2000)
+    await profile_page.wait_for_timeout(1500)
 
 
 async def _get_visible_cards(page: Page) -> list[dict]:
@@ -526,7 +548,7 @@ async def _get_visible_cards(page: Page) -> list[dict]:
     cards = await page.evaluate(
         """(roleNames) => {
             const roleSet = new Set(roleNames);
-            const anchors = Array.from(document.querySelectorAll('a[href*="/talent/"], a[href*="ytjobs.co/talent/"]'));
+            const anchors = Array.from(document.querySelectorAll('a[href*="/talent/profile/"]'));
             const out = [];
 
             for (const a of anchors) {
@@ -541,6 +563,7 @@ async def _get_visible_cards(page: Page) -> list[dict]:
 
                 let name = '';
                 let role = '';
+
                 for (let i = 0; i < lines.length - 1; i++) {
                     if (roleSet.has(lines[i + 1])) {
                         name = lines[i];
@@ -552,25 +575,18 @@ async def _get_visible_cards(page: Page) -> list[dict]:
                 if (!name || !role) continue;
 
                 const rect = a.getBoundingClientRect();
-                out.push({
-                    name,
-                    role,
-                    href,
-                    x: rect.x,
-                    y: rect.y
-                });
+                out.push({ name, role, href, x: rect.x, y: rect.y });
             }
 
-            const dedup = [];
             const seen = new Set();
-            for (const item of out.sort((a, b) => a.y - b.y || a.x - b.x)) {
-                const key = `${item.name}||${item.role}||${item.href}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                dedup.push(item);
-            }
-
-            return dedup;
+            return out
+                .sort((a, b) => a.y - b.y || a.x - b.x)
+                .filter(x => {
+                    const key = `${x.name}|${x.role}|${x.href}`;
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                });
         }""",
         role_names,
     )
@@ -579,28 +595,26 @@ async def _get_visible_cards(page: Page) -> list[dict]:
 
 async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
     html = await profile_page.content()
+    sections = []
 
-    section_texts = []
-
-    section_labels = [
+    labels = [
         "About",
         "Portfolio",
         "Experience",
         "Verified Clients",
-        "Clients",
-        "Past Creators",
         "Client Reviews",
-        "Categories",
         "Roles",
+        "Categories",
+        "Confirmed info",
     ]
 
-    for label in section_labels:
+    for label in labels:
         try:
             loc = profile_page.get_by_text(label, exact=True).first
             if await loc.count() > 0:
                 text = await loc.locator("xpath=..").inner_text(timeout=1500)
                 if text and text.strip():
-                    section_texts.append(text.strip())
+                    sections.append(text.strip())
         except Exception:
             pass
 
@@ -609,75 +623,53 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
     except Exception:
         body_text = ""
 
-    combined = "\n\n".join(_dedupe_keep_order(section_texts + [body_text]))
-    return combined, html
+    combined_text = "\n\n".join(_dedupe_keep_order(sections + [body_text]))
+    return combined_text, html
 
 
-async def _scrape_clients_from_profile(profile_page: Page) -> str:
-    collected = []
+async def _extract_creators(profile_page: Page) -> str:
+    creators = []
 
-    possible_labels = [
-        "Verified Clients",
-        "Clients",
-        "Past Creators",
-    ]
+    try:
+        imgs = profile_page.locator("img[alt]")
+        count = await imgs.count()
 
-    for label in possible_labels:
-        try:
-            header = profile_page.get_by_text(label, exact=True).first
-            if await header.count() == 0:
+        for i in range(count):
+            alt = await imgs.nth(i).get_attribute("alt")
+            if not alt:
                 continue
 
-            container = header.locator("xpath=..")
-            for _ in range(5):
-                try:
-                    section_text = await container.inner_text(timeout=1500)
-                except Exception:
-                    section_text = ""
+            clean = _clean_creator_line(alt)
+            lowered = clean.lower()
 
-                if section_text:
-                    lines = [ln.strip() for ln in section_text.splitlines() if ln.strip()]
-                    for line in lines:
-                        clean = _clean_creator_line(line)
-                        lowered = clean.lower()
-                        if not clean:
-                            continue
-                        if lowered in {
-                            "verified clients", "clients", "past creators",
-                            "client reviews", "vouch", "portfolio", "about", "experience"
-                        }:
-                            continue
-                        if len(clean) < 2 or len(clean) > 60:
-                            continue
-                        if re.search(r"subscribers?|reviews?|vouch|videos?|views?", lowered):
-                            continue
-                        collected.append(clean)
+            if not clean:
+                continue
+            if lowered in {
+                "profile", "timeline", "posts", "verified", "hire me", "book me"
+            }:
+                continue
+            if len(clean) < 2 or len(clean) > 60:
+                continue
+            if re.search(r"subscribers?|reviews?|vouch|videos?|views?", lowered):
+                continue
 
-                next_selectors = [
-                    'button[aria-label*="next" i]',
-                    '.swiper-button-next',
-                    '[data-swiper-next]',
-                ]
+            creators.append(clean)
 
-                clicked = False
-                for selector in next_selectors:
-                    try:
-                        btn = container.locator(selector).first
-                        if await btn.count() > 0:
-                            await btn.click(timeout=1000)
-                            await profile_page.wait_for_timeout(700)
-                            clicked = True
-                            break
-                    except Exception:
-                        pass
+    except Exception:
+        pass
 
-                if not clicked:
-                    break
+    deduped = _dedupe_keep_order(creators)
+    filtered = []
 
-        except Exception:
+    for c in deduped:
+        lowered = c.lower()
+        if lowered in {
+            "profile", "timeline", "posts", "about", "experience", "portfolio", "roles"
+        }:
             continue
+        filtered.append(c)
 
-    return ", ".join(_dedupe_keep_order(collected)[:10])
+    return ", ".join(filtered[:8])
 
 
 async def _scrape_profile(context, card: dict) -> TalentRecord | None:
@@ -693,18 +685,17 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         await profile_page.wait_for_timeout(1200)
 
         combined_text, html = await _collect_profile_text(profile_page)
-        everything = f"{combined_text}\n{html}"
 
-        linkedin, twitter, youtube = _extract_social_links(everything)
-        email = _extract_public_email(everything)
-        views = _extract_views_text(everything)
+        linkedin, twitter, youtube = _extract_social_links(combined_text + "\n" + html)
+        email = _extract_public_email(combined_text)
+        views = _extract_views_text(combined_text)
         niche = _extract_niche(combined_text)
         years = _extract_years_of_experience(combined_text)
         open_for_work = _detect_open_to_work_text(combined_text)
 
         role = DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(combined_text) or _normalize_role(card["role"])
 
-        creators = await _scrape_clients_from_profile(profile_page)
+        creators = await _extract_creators(profile_page)
         if not creators:
             creators = _extract_creator_summary(combined_text)
 
@@ -717,13 +708,11 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
             open_for_work=open_for_work,
             creators_worked_with=creators,
             views=views,
-            priority=None,
             job_role=role,
             niche=niche,
             twitter=twitter,
             youtube=youtube,
         )
-        rec.priority = _normalize_priority(rec)
 
         print("EMAIL PARSED:", rec.email)
         print("VIEWS PARSED:", rec.views)
@@ -895,9 +884,6 @@ def build_column_values(rec: TalentRecord) -> dict:
     elif rec.open_for_work is False:
         vals[MONDAY_COLUMNS["open_for_work"]] = {"checked": False}
 
-    if rec.priority:
-        vals[MONDAY_COLUMNS["priority"]] = {"label": rec.priority}
-
     if rec.job_role:
         vals[MONDAY_COLUMNS["job_role"]] = {"labels": [rec.job_role]}
 
@@ -1011,8 +997,7 @@ def main() -> None:
         print(
             f"[{idx}] Creating: {rec.name} | role={rec.job_role} | "
             f"group={group_id} | open_for_work={rec.open_for_work} | "
-            f"priority={rec.priority} | niche={rec.niche} | views={rec.views} | "
-            f"email={rec.email} | creators={rec.creators_worked_with}"
+            f"niche={rec.niche} | views={rec.views} | email={rec.email} | creators={rec.creators_worked_with}"
         )
 
         try:
