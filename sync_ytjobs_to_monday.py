@@ -56,6 +56,7 @@ MONDAY_COLUMNS = {
     "views": os.getenv("MONDAY_VIEWS_COLUMN_ID", "text_mm20rjas"),
     "job_role": os.getenv("MONDAY_JOB_ROLE_COLUMN_ID", "dropdown_mm22xt4g"),
     "niche": os.getenv("MONDAY_NICHE_COLUMN_ID", "long_text_mm26cehz"),
+    "location": os.getenv("MONDAY_LOCATION_COLUMN_ID", "text_mm27dy8q"),
     "socials": os.getenv("MONDAY_SOCIALS_COLUMN_ID", "link_mm26njaz"),
 }
 
@@ -70,22 +71,18 @@ ROLE_ALIASES = {
     "account manager": "Channel Manager",
     "operations manager": "Channel Manager",
     "growth manager": "Channel Manager",
-
     "strategist": "Strategist",
     "youtube strategist": "Strategist",
     "content strategist": "Strategist",
     "growth strategist": "Strategist",
-
     "producer": "Producer",
     "youtube producer": "Producer",
     "content producer": "Producer",
     "video producer": "Producer",
     "executive producer": "Producer",
-
     "creative director": "Creative Director",
     "creative lead": "Creative Director",
     "head of creative": "Creative Director",
-
     "editor": "Long-Form Editor",
     "video editor": "Long-Form Editor",
     "youtube editor": "Long-Form Editor",
@@ -97,18 +94,15 @@ ROLE_ALIASES = {
     "tiktok editor": "Short-Form Editor",
     "long-form editor": "Long-Form Editor",
     "long form editor": "Long-Form Editor",
-
     "scriptwriter": "Scriptwriter",
     "script writer": "Scriptwriter",
     "writer": "Scriptwriter",
     "youtube writer": "Scriptwriter",
     "content writer": "Scriptwriter",
-
     "thumbnail designer": "Thumbnail Designer",
     "thumbnail artist": "Thumbnail Designer",
     "thumb designer": "Thumbnail Designer",
     "thumbnail": "Thumbnail Designer",
-
     "animator": "Animator",
     "motion designer": "Animator",
     "motion graphics": "Animator",
@@ -150,6 +144,8 @@ NICHE_KEYWORDS = {
     "Lifestyle": ["lifestyle", "vlog", "travel", "daily life", "people & blogs"],
     "Commentary": ["commentary", "reaction", "drama", "internet culture"],
     "Entertainment": ["challenge", "prank", "comedy", "entertainment", "viral"],
+    "Economy": ["economy"],
+    "People & Blogs": ["people & blogs"],
 }
 
 JUNK_NAME_PATTERNS = [
@@ -188,6 +184,7 @@ class TalentRecord:
     views: str = ""
     job_role: str | None = None
     niche: str = ""
+    location: str = ""
     twitter: str = ""
     youtube: str = ""
 
@@ -223,6 +220,21 @@ def _extract_num(text: str) -> float | None:
     elif suffix == "b":
         num *= 1_000_000_000
     return num
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for v in values:
+        clean = (v or "").strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(clean)
+    return out
 
 
 def _is_junk_name(name: str) -> bool:
@@ -264,9 +276,11 @@ def _extract_views_text(text: str) -> str:
         return ""
 
     patterns = [
-        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand|[bmk])\s+views",
-        r"(\d+(?:\.\d+)?)\s*([bmk])\s*views",
-        r"views\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([bmk])?",
+        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s+views",
+        r"(\d+(?:\.\d+)?)\+?\s*([BKM])\s+Views",
+        r"(\d+(?:\.\d+)?)\+?\s*([bkm])\s+views",
+        r"(\d+(?:\.\d+)?)\+?\s*([BKM])\b.*?Views",
+        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\b.*?views",
     ]
 
     for pattern in patterns:
@@ -276,7 +290,6 @@ def _extract_views_text(text: str) -> str:
 
         num = m.group(1).replace(",", "")
         suffix = (m.group(2) or "").lower()
-
         suffix_map = {
             "billion": "B",
             "million": "M",
@@ -288,24 +301,9 @@ def _extract_views_text(text: str) -> str:
         suffix = suffix_map.get(suffix, suffix.upper())
         plus = "+" if "+" in m.group(0) else ""
 
-        return f"{num}{plus}{suffix} Views".strip()
+        return f"{num}{plus}{suffix} Views"
 
     return ""
-
-
-def _dedupe_keep_order(values: list[str]) -> list[str]:
-    seen = set()
-    out = []
-    for v in values:
-        clean = (v or "").strip()
-        if not clean:
-            continue
-        key = clean.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(clean)
-    return out
 
 
 def _extract_public_email(text: str) -> str:
@@ -381,71 +379,48 @@ def _extract_niche(text: str) -> str:
     if not text:
         return ""
 
-    found = []
-    blocked = {
-        "roles",
-        "post a job",
-        "join as talent",
-        "how it works",
-        "login",
-        "sign up",
-        "home",
-        "jobs",
-        "talent",
-        "forum",
-        "feed",
-        "faq",
-        "blog",
-        "profile",
-        "timeline",
-        "posts",
-        "hire me",
-        "book me",
-        "verified clients",
-        "client reviews",
-        "experience",
-        "about",
-        "portfolio",
-        "confirmed info",
-        "open for work",
+    allowed = {
+        "Gaming",
+        "Finance",
+        "Beauty",
+        "Fitness",
+        "Tech",
+        "Business",
+        "Education",
+        "Podcast",
+        "Food",
+        "Lifestyle",
+        "Commentary",
+        "Entertainment",
+        "Economy",
+        "People & Blogs",
     }
 
-    category_section_patterns = [
-        r"Categories\s*(.*?)(?:\nExperience|\nAbout|\nPortfolio|\nVerified Clients|\nClient Reviews|$)",
-        r"Category\s*(.*?)(?:\nExperience|\nAbout|\nPortfolio|\nVerified Clients|\nClient Reviews|$)",
-    ]
+    found = []
 
-    for pattern in category_section_patterns:
-        m = re.search(pattern, text, re.I | re.S)
-        if not m:
-            continue
-
-        section = m.group(1)
-        lines = [ln.strip() for ln in section.splitlines() if ln.strip()]
+    m = re.search(
+        r"Categories\s*(.*?)(?:\nConfirmed info|\nExperience|\nAbout|\nPortfolio|\nVerified Clients|\nClient Reviews|$)",
+        text,
+        re.I | re.S,
+    )
+    if m:
+        lines = [ln.strip() for ln in m.group(1).splitlines() if ln.strip()]
         for line in lines:
-            lowered = line.lower()
-            if lowered in blocked:
-                continue
-            if len(line) > 35:
-                continue
-            if re.search(r"post a job|join as talent|login|sign up|how it works", lowered):
-                continue
-            if re.search(r"subscribers?|videos?|views?|verified", lowered):
-                continue
-            found.append(line)
+            if line in allowed and line not in found:
+                found.append(line)
 
-    lowered_text = text.lower()
+    lowered = text.lower()
     keyword_scores = {}
     for niche, keywords in NICHE_KEYWORDS.items():
-        score = sum(1 for kw in keywords if kw in lowered_text)
+        score = sum(1 for kw in keywords if kw in lowered)
         if score:
             keyword_scores[niche] = score
 
-    ranked = [name for name, _ in sorted(keyword_scores.items(), key=lambda x: x[1], reverse=True)]
-    for niche in ranked:
-        found.append(niche)
+    for niche, _ in sorted(keyword_scores.items(), key=lambda x: x[1], reverse=True):
+        if niche in allowed and niche not in found:
+            found.append(niche)
 
-    return ", ".join(_dedupe_keep_order(found)[:6])
+    return ", ".join(found[:4])
 
 
 def _extract_years_of_experience(text: str) -> float | None:
@@ -492,8 +467,17 @@ def _extract_creator_summary(text: str) -> str:
                 if not clean:
                     continue
                 if lowered in {
-                    "profile", "timeline", "posts", "verified clients", "clients",
-                    "client reviews", "vouch", "portfolio", "about", "experience"
+                    "profile",
+                    "timeline",
+                    "posts",
+                    "verified clients",
+                    "clients",
+                    "client reviews",
+                    "vouch",
+                    "portfolio",
+                    "about",
+                    "experience",
+                    "confirmed info",
                 }:
                     continue
                 if len(clean) < 2 or len(clean) > 60:
@@ -644,9 +628,7 @@ async def _extract_creators(profile_page: Page) -> str:
 
             if not clean:
                 continue
-            if lowered in {
-                "profile", "timeline", "posts", "verified", "hire me", "book me"
-            }:
+            if lowered in {"profile", "timeline", "posts", "verified", "hire me", "book me"}:
                 continue
             if len(clean) < 2 or len(clean) > 60:
                 continue
@@ -654,22 +636,82 @@ async def _extract_creators(profile_page: Page) -> str:
                 continue
 
             creators.append(clean)
-
     except Exception:
         pass
 
-    deduped = _dedupe_keep_order(creators)
     filtered = []
-
-    for c in deduped:
+    for c in _dedupe_keep_order(creators):
         lowered = c.lower()
-        if lowered in {
-            "profile", "timeline", "posts", "about", "experience", "portfolio", "roles"
-        }:
+        if lowered in {"profile", "timeline", "posts", "about", "experience", "portfolio", "roles"}:
             continue
         filtered.append(c)
 
     return ", ".join(filtered[:8])
+
+
+async def _extract_location(profile_page: Page) -> str:
+    try:
+        modal_opened = False
+
+        try:
+            confirmed = profile_page.get_by_text("Confirmed info", exact=True).first
+            if await confirmed.count() > 0:
+                await confirmed.click(timeout=1500)
+                await profile_page.wait_for_timeout(800)
+        except Exception:
+            pass
+
+        try:
+            if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
+                modal_opened = True
+        except Exception:
+            pass
+
+        if not modal_opened:
+            try:
+                icons = profile_page.locator("svg")
+                count = await icons.count()
+                for i in range(min(count, 120)):
+                    try:
+                        box = await icons.nth(i).bounding_box()
+                        if not box:
+                            continue
+                        if 120 <= box["x"] <= 500 and 450 <= box["y"] <= 900:
+                            await icons.nth(i).click(timeout=800)
+                            await profile_page.wait_for_timeout(700)
+                            if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
+                                modal_opened = True
+                                break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        if modal_opened:
+            body_text = await profile_page.locator("body").inner_text()
+
+            patterns = [
+                r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’']s location is verified",
+                r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+            ]
+
+            for pattern in patterns:
+                m = re.search(pattern, body_text, re.I)
+                if m:
+                    return m.group(1).strip()
+
+            modal = profile_page.locator("body")
+            modal_text = await modal.inner_text()
+            m = re.search(r"\b([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\b", modal_text)
+            if m:
+                location = m.group(1).strip()
+                blocked = {"Why is this", "Confirmed info"}
+                if location not in blocked:
+                    return location
+    except Exception:
+        pass
+
+    return ""
 
 
 async def _scrape_profile(context, card: dict) -> TalentRecord | None:
@@ -688,10 +730,11 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         linkedin, twitter, youtube = _extract_social_links(combined_text + "\n" + html)
         email = _extract_public_email(combined_text)
-        views = _extract_views_text(combined_text)
+        views = _extract_views_text(combined_text + "\n" + html)
         niche = _extract_niche(combined_text)
         years = _extract_years_of_experience(combined_text)
         open_for_work = _detect_open_to_work_text(combined_text)
+        location = await _extract_location(profile_page)
 
         role = DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(combined_text) or _normalize_role(card["role"])
 
@@ -710,6 +753,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
             views=views,
             job_role=role,
             niche=niche,
+            location=location,
             twitter=twitter,
             youtube=youtube,
         )
@@ -718,6 +762,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print("VIEWS PARSED:", rec.views)
         print("CREATORS PARSED:", rec.creators_worked_with)
         print("NICHE PARSED:", rec.niche)
+        print("LOCATION PARSED:", rec.location)
 
         return rec
 
@@ -887,6 +932,9 @@ def build_column_values(rec: TalentRecord) -> dict:
     if rec.job_role:
         vals[MONDAY_COLUMNS["job_role"]] = {"labels": [rec.job_role]}
 
+    if MONDAY_COLUMNS["location"]:
+        vals[MONDAY_COLUMNS["location"]] = rec.location or ""
+
     social_url = _pick_primary_social(rec)
     if social_url:
         vals[MONDAY_COLUMNS["socials"]] = {"url": social_url, "text": "Profile"}
@@ -995,9 +1043,9 @@ def main() -> None:
         values = build_column_values(rec)
 
         print(
-            f"[{idx}] Creating: {rec.name} | role={rec.job_role} | "
-            f"group={group_id} | open_for_work={rec.open_for_work} | "
-            f"niche={rec.niche} | views={rec.views} | email={rec.email} | creators={rec.creators_worked_with}"
+            f"[{idx}] Creating: {rec.name} | role={rec.job_role} | group={group_id} | "
+            f"open_for_work={rec.open_for_work} | niche={rec.niche} | views={rec.views} | "
+            f"email={rec.email} | location={rec.location} | creators={rec.creators_worked_with}"
         )
 
         try:
