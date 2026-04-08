@@ -148,7 +148,7 @@ DISPLAY_ROLE_ALIASES = {
 
 NICHE_KEYWORDS = {
     "Gaming": ["gaming", "fortnite", "minecraft", "warzone", "call of duty", "twitch", "streamer"],
-    "Finance": ["finance", "investing", "stocks", "crypto", "real estate", "money"],
+    "Finance": ["finance", "investing", "stocks", "crypto", "real estate", "money", "economy"],
     "Beauty": ["beauty", "makeup", "skincare", "fashion", "grwm"],
     "Fitness": ["fitness", "workout", "gym", "bodybuilding", "health"],
     "Tech": ["tech", "software", "ai", "developer", "gadgets", "coding"],
@@ -156,7 +156,7 @@ NICHE_KEYWORDS = {
     "Education": ["education", "tutorial", "explainer", "teaching", "course"],
     "Podcast": ["podcast", "interview", "conversation"],
     "Food": ["food", "cooking", "recipe", "chef"],
-    "Lifestyle": ["lifestyle", "vlog", "travel", "daily life"],
+    "Lifestyle": ["lifestyle", "vlog", "travel", "daily life", "people & blogs"],
     "Commentary": ["commentary", "reaction", "drama", "internet culture"],
     "Entertainment": ["challenge", "prank", "comedy", "entertainment", "viral"],
 }
@@ -272,16 +272,34 @@ def _detect_open_to_work_text(text: str) -> bool | None:
 def _extract_views_text(text: str) -> str:
     if not text:
         return ""
+
     patterns = [
-        r"(\d+(?:\.\d+)?)\s*([kmb])?\s+views",
-        r"views\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([kmb])?",
+        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand|[bmk])\s+views",
+        r"(\d+(?:\.\d+)?)\s*([bmk])\s*views",
+        r"views\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([bmk])?",
     ]
+
     for pattern in patterns:
         m = re.search(pattern, text, re.I)
-        if m:
-            num = m.group(1)
-            suffix = (m.group(2) or "").upper()
-            return f"{num}{suffix} Views".strip()
+        if not m:
+            continue
+
+        num = m.group(1).replace(",", "")
+        suffix = (m.group(2) or "").lower()
+
+        suffix_map = {
+            "billion": "B",
+            "million": "M",
+            "thousand": "K",
+            "b": "B",
+            "m": "M",
+            "k": "K",
+        }
+        suffix = suffix_map.get(suffix, suffix.upper())
+        plus = "+" if "+" in m.group(0) else ""
+
+        return f"{num}{plus}{suffix} Views".strip()
+
     return ""
 
 
@@ -289,60 +307,65 @@ def _extract_creator_summary(text: str) -> str:
     if not text:
         return ""
 
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    chunks: list[str] = []
+    found = []
+
+    handles = re.findall(r"@([A-Za-z0-9_.]+)", text)
+    for h in handles:
+        clean = h.strip()
+        if clean and clean not in found:
+            found.append(clean)
 
     patterns = [
-        r"(worked with[^\n]+)",
-        r"(clients?[^\n]+)",
-        r"(creators? worked with[^\n]+)",
-        r"(experience[^\n]+)",
-        r"(past work[^\n]+)",
+        r"worked with\s+([^\n]+)",
+        r"clients?\s*[:\-]?\s*([^\n]+)",
     ]
+
     for pattern in patterns:
         for m in re.finditer(pattern, text, re.I):
             chunk = " ".join(m.group(1).split())
-            if chunk and chunk not in chunks:
-                chunks.append(chunk)
+            if chunk and chunk not in found:
+                found.append(chunk)
 
-    client_section = []
-    capture = False
-    for line in lines:
-        lower = line.lower()
-        if lower in {"clients", "verified clients"} or lower == "clients":
-            capture = True
-            continue
-        if capture:
-            if len(line.split()) <= 8 and not re.search(r"(view|profile|portfolio|posts|timeline|faq|blog|jobs|talent)", lower):
-                client_section.append(line)
-            if len(client_section) >= 8:
-                break
-
-    if client_section:
-        client_text = ", ".join(dict.fromkeys(client_section))
-        if client_text not in chunks:
-            chunks.append(client_text)
-
-    return " | ".join(chunks[:5])
+    return ", ".join(found[:8])
 
 
 def _extract_niche(text: str) -> str:
     if not text:
         return ""
-    lowered = text.lower()
-    scores = {}
 
+    found = []
+
+    category_match = re.search(r"Categories\s+(.*)", text, re.I | re.S)
+    if category_match:
+        section = category_match.group(1)
+        lines = [ln.strip() for ln in section.splitlines() if ln.strip()]
+        for line in lines[:10]:
+            if len(line) <= 40 and line.lower() not in {"home", "jobs", "talent", "forum", "feed", "faq", "blog"}:
+                if line not in found:
+                    found.append(line)
+
+    lowered = text.lower()
+    keyword_scores = {}
     for niche, keywords in NICHE_KEYWORDS.items():
         score = sum(1 for kw in keywords if kw in lowered)
         if score:
-            scores[niche] = score
+            keyword_scores[niche] = score
 
-    if not scores:
+    ranked = [name for name, _ in sorted(keyword_scores.items(), key=lambda x: x[1], reverse=True)]
+    for niche in ranked:
+        if niche not in found:
+            found.append(niche)
+
+    return ", ".join(found[:6])
+
+
+def _extract_public_email(text: str) -> str:
+    if not text:
         return ""
-
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    top = [name for name, _ in ranked[:3]]
-    return ", ".join(top)
+    matches = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, re.I)
+    for email in matches:
+        return email.strip()
+    return ""
 
 
 def _extract_social_links(text: str) -> tuple[str, str, str]:
@@ -493,17 +516,28 @@ async def _extract_panel_text(page: Page) -> str:
             """() => {
                 const minX = window.innerWidth * 0.42;
                 let bestText = "";
-                let bestLen = 0;
+                let bestScore = 0;
 
                 const all = Array.from(document.querySelectorAll("body *"));
                 for (const el of all) {
                     const rect = el.getBoundingClientRect();
                     if (rect.x < minX || rect.width < 250 || rect.height < 120) continue;
+
                     const text = (el.innerText || el.textContent || "").trim();
                     if (!text) continue;
-                    if (text.length > bestLen && (text.includes("Portfolio") || text.includes("Hire Me") || text.includes("Profile"))) {
+
+                    let score = text.length;
+                    if (text.includes("Portfolio")) score += 500;
+                    if (text.includes("Hire Me")) score += 500;
+                    if (text.includes("Clients")) score += 400;
+                    if (text.includes("Views")) score += 400;
+                    if (text.includes("About")) score += 300;
+                    if (text.includes("Experience")) score += 300;
+                    if (text.includes("Categories")) score += 300;
+
+                    if (score > bestScore) {
                         bestText = text;
-                        bestLen = text.length;
+                        bestScore = score;
                     }
                 }
 
@@ -560,6 +594,8 @@ async def _scrape_clicked_panel(page: Page, card: dict, page_no: int, idx: int) 
         return None
 
     panel_text = await _extract_panel_text(page)
+    body_text = await page.locator("body").inner_text()
+    combined_text = f"{panel_text}\n{body_text}"
     page_content = await page.content()
     profile_link = await _extract_panel_profile_link(page)
 
@@ -567,17 +603,14 @@ async def _scrape_clicked_panel(page: Page, card: dict, page_no: int, idx: int) 
         slug = re.sub(r"[^a-z0-9]+", "-", card["name"].lower()).strip("-")
         profile_link = f"{SEARCH_URL.format(page=page_no)}#inline-{page_no}-{idx}-{slug}"
 
-    linkedin, twitter, youtube = _extract_social_links(panel_text + "\n" + page_content)
+    linkedin, twitter, youtube = _extract_social_links(combined_text + "\n" + page_content)
 
     years = None
-    m = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*years", panel_text.lower())
+    m = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*years", combined_text.lower())
     if m:
         years = _extract_num(m.group(1))
 
-    email = ""
-    email_matches = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", panel_text, re.I)
-    if email_matches and "private" not in panel_text.lower():
-        email = email_matches[0]
+    email = _extract_public_email(combined_text)
 
     rec = TalentRecord(
         name=card["name"],
@@ -585,16 +618,22 @@ async def _scrape_clicked_panel(page: Page, card: dict, page_no: int, idx: int) 
         linkedin=linkedin,
         email=email,
         years_of_experience=years,
-        open_for_work=_detect_open_to_work_text(panel_text),
-        creators_worked_with=_extract_creator_summary(panel_text),
-        views=_extract_views_text(panel_text),
+        open_for_work=_detect_open_to_work_text(combined_text),
+        creators_worked_with=_extract_creator_summary(combined_text),
+        views=_extract_views_text(combined_text),
         priority=None,
-        job_role=DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(panel_text) or _normalize_role(card["role"]),
-        niche=_extract_niche(panel_text),
+        job_role=DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(combined_text) or _normalize_role(card["role"]),
+        niche=_extract_niche(combined_text),
         twitter=twitter,
         youtube=youtube,
     )
     rec.priority = _normalize_priority(rec)
+
+    print("EMAIL PARSED:", rec.email)
+    print("VIEWS PARSED:", rec.views)
+    print("CREATORS PARSED:", rec.creators_worked_with)
+    print("NICHE PARSED:", rec.niche)
+
     return rec
 
 
@@ -870,7 +909,7 @@ def main() -> None:
         print(
             f"[{idx}] Creating: {rec.name} | role={rec.job_role} | "
             f"group={group_id} | open_for_work={rec.open_for_work} | "
-            f"priority={rec.priority} | niche={rec.niche} | views={rec.views}"
+            f"priority={rec.priority} | niche={rec.niche} | views={rec.views} | email={rec.email} | creators={rec.creators_worked_with}"
         )
 
         try:
