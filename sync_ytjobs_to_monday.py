@@ -52,8 +52,8 @@ MONDAY_COLUMNS = {
     "email": os.getenv("MONDAY_EMAIL_COLUMN_ID", "text_mm2028sd"),
     "years_of_experience": os.getenv("MONDAY_YOE_COLUMN_ID", "numeric_mm20gyp"),
     "open_for_work": os.getenv("MONDAY_OPEN_FOR_WORK_COLUMN_ID", "boolean_mm20xkyn"),
-    "creators_worked_with": os.getenv("MONDAY_CREATORS_WORKED_WITH_COLUMN_ID", "text_mm20xxmt"),
-    "views": os.getenv("MONDAY_VIEWS_COLUMN_ID", "text_mm20rjas"),
+    "creators_worked_with": os.getenv("MONDAY_CREATORS_WORKED_WITH_COLUMN_ID", "dropdown_mm20xxmt"),
+    "views": os.getenv("MONDAY_VIEWS_COLUMN_ID", "numeric_mm20rjas"),
     "job_role": os.getenv("MONDAY_JOB_ROLE_COLUMN_ID", "dropdown_mm22xt4g"),
     "niche": os.getenv("MONDAY_NICHE_COLUMN_ID", "long_text_mm26cehz"),
     "location": os.getenv("MONDAY_LOCATION_COLUMN_ID", "text_mm27dy8q"),
@@ -181,7 +181,7 @@ class TalentRecord:
     years_of_experience: float | None = None
     open_for_work: bool | None = None
     creators_worked_with: str = ""
-    views: str = ""
+    views: float | None = None
     job_role: str | None = None
     niche: str = ""
     location: str = ""
@@ -271,16 +271,14 @@ def _detect_open_to_work_text(text: str) -> bool | None:
     return None
 
 
-def _extract_views_text(text: str) -> str:
+def _extract_views_number(text: str) -> float | None:
     if not text:
-        return ""
+        return None
 
     patterns = [
         r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s+views",
         r"(\d+(?:\.\d+)?)\+?\s*([BKM])\s+Views",
         r"(\d+(?:\.\d+)?)\+?\s*([bkm])\s+views",
-        r"(\d+(?:\.\d+)?)\+?\s*([BKM])\b.*?Views",
-        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\b.*?views",
     ]
 
     for pattern in patterns:
@@ -288,22 +286,19 @@ def _extract_views_text(text: str) -> str:
         if not m:
             continue
 
-        num = m.group(1).replace(",", "")
+        num = float(m.group(1).replace(",", ""))
         suffix = (m.group(2) or "").lower()
-        suffix_map = {
-            "billion": "B",
-            "million": "M",
-            "thousand": "K",
-            "b": "B",
-            "m": "M",
-            "k": "K",
-        }
-        suffix = suffix_map.get(suffix, suffix.upper())
-        plus = "+" if "+" in m.group(0) else ""
 
-        return f"{num}{plus}{suffix} Views"
+        if suffix in {"billion", "b"}:
+            num *= 1_000_000_000
+        elif suffix in {"million", "m"}:
+            num *= 1_000_000
+        elif suffix in {"thousand", "k"}:
+            num *= 1_000
 
-    return ""
+        return round(num)
+
+    return None
 
 
 def _extract_public_email(text: str) -> str:
@@ -489,6 +484,12 @@ def _extract_creator_summary(text: str) -> str:
     return ", ".join(_dedupe_keep_order(found)[:10])
 
 
+def _split_creators_for_dropdown(text: str) -> list[str]:
+    if not text:
+        return []
+    return [x.strip() for x in text.split(",") if x.strip()][:20]
+
+
 async def _accept_cookies(page: Page) -> None:
     possible_texts = ["Accept", "I Accept", "Accept All", "Allow all"]
     for txt in possible_texts:
@@ -612,102 +613,117 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 
 async def _extract_creators(profile_page: Page) -> str:
-    creators = []
+    found = []
 
-    try:
-        imgs = profile_page.locator("img[alt]")
-        count = await imgs.count()
+    blocked_contains = [
+        "ytjobs logo",
+        "profile banner",
+        "avatar",
+        "channel logo",
+        "channel medal",
+        "banner",
+        "logo",
+        "medal",
+    ]
 
-        for i in range(count):
-            alt = await imgs.nth(i).get_attribute("alt")
-            if not alt:
+    section_labels = ["Verified Clients", "Clients Worked With", "Past Creators", "Clients"]
+
+    for label in section_labels:
+        try:
+            header = profile_page.get_by_text(label, exact=True).first
+            if await header.count() == 0:
                 continue
 
-            clean = _clean_creator_line(alt)
-            lowered = clean.lower()
+            container = header.locator("xpath=..")
+            text = await container.inner_text(timeout=2000)
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-            if not clean:
-                continue
-            if lowered in {"profile", "timeline", "posts", "verified", "hire me", "book me"}:
-                continue
-            if len(clean) < 2 or len(clean) > 60:
-                continue
-            if re.search(r"subscribers?|reviews?|vouch|videos?|views?", lowered):
-                continue
+            for line in lines:
+                lowered = line.lower()
 
-            creators.append(clean)
-    except Exception:
-        pass
+                if any(x in lowered for x in blocked_contains):
+                    continue
+                if lowered in {
+                    "verified clients",
+                    "clients worked with",
+                    "past creators",
+                    "clients",
+                    "client reviews",
+                    "about",
+                    "experience",
+                    "portfolio",
+                    "confirmed info",
+                    "profile",
+                    "timeline",
+                    "posts",
+                }:
+                    continue
+                if re.search(r"subscribers?|views?|videos?|reviews?|vouch", lowered):
+                    continue
+                if len(line) < 2 or len(line) > 60:
+                    continue
 
-    filtered = []
-    for c in _dedupe_keep_order(creators):
-        lowered = c.lower()
-        if lowered in {"profile", "timeline", "posts", "about", "experience", "portfolio", "roles"}:
+                found.append(line)
+        except Exception:
             continue
-        filtered.append(c)
 
-    return ", ".join(filtered[:8])
+    return ", ".join(_dedupe_keep_order(found)[:15])
 
 
 async def _extract_location(profile_page: Page) -> str:
     try:
-        modal_opened = False
+        candidates = profile_page.locator('button, [role="button"], svg, [data-testid], [aria-label]')
+        count = await candidates.count()
 
-        try:
-            confirmed = profile_page.get_by_text("Confirmed info", exact=True).first
-            if await confirmed.count() > 0:
-                await confirmed.click(timeout=1500)
-                await profile_page.wait_for_timeout(800)
-        except Exception:
-            pass
-
-        try:
-            if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
-                modal_opened = True
-        except Exception:
-            pass
-
-        if not modal_opened:
+        for i in range(min(count, 200)):
             try:
-                icons = profile_page.locator("svg")
-                count = await icons.count()
-                for i in range(min(count, 120)):
+                el = candidates.nth(i)
+                box = await el.bounding_box()
+                if not box:
+                    continue
+
+                if not (120 <= box["x"] <= 500 and 450 <= box["y"] <= 950):
+                    continue
+
+                aria = (await el.get_attribute("aria-label") or "").lower()
+                title = (await el.get_attribute("title") or "").lower()
+
+                looks_like_location = any(
+                    key in aria or key in title
+                    for key in ["location", "map", "pin", "place"]
+                )
+
+                if looks_like_location or (box["width"] <= 40 and box["height"] <= 40):
+                    await el.click(timeout=1000, force=True)
+                    await profile_page.wait_for_timeout(1200)
+
+                    body_text = await profile_page.locator("body").inner_text()
+
+                    patterns = [
+                        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’']s location is verified",
+                        r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+                        r"\b([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+)\b",
+                    ]
+
+                    for pattern in patterns:
+                        m = re.search(pattern, body_text, re.I)
+                        if m:
+                            location = m.group(1).strip()
+                            if location.lower() not in {
+                                "confirmed info",
+                                "why is this important",
+                            }:
+                                return location
+
                     try:
-                        box = await icons.nth(i).bounding_box()
-                        if not box:
-                            continue
-                        if 120 <= box["x"] <= 500 and 450 <= box["y"] <= 900:
-                            await icons.nth(i).click(timeout=800)
-                            await profile_page.wait_for_timeout(700)
-                            if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
-                                modal_opened = True
-                                break
+                        await profile_page.keyboard.press("Escape")
+                        await profile_page.wait_for_timeout(300)
                     except Exception:
-                        continue
+                        pass
+
             except Exception:
-                pass
+                continue
 
-        if modal_opened:
-            body_text = await profile_page.locator("body").inner_text()
-
-            patterns = [
-                r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’']s location is verified",
-                r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
-            ]
-
-            for pattern in patterns:
-                m = re.search(pattern, body_text, re.I)
-                if m:
-                    return m.group(1).strip()
-
-            modal = profile_page.locator("body")
-            modal_text = await modal.inner_text()
-            m = re.search(r"\b([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\b", modal_text)
-            if m:
-                location = m.group(1).strip()
-                blocked = {"Why is this", "Confirmed info"}
-                if location not in blocked:
-                    return location
     except Exception:
         pass
 
@@ -730,7 +746,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         linkedin, twitter, youtube = _extract_social_links(combined_text + "\n" + html)
         email = _extract_public_email(combined_text)
-        views = _extract_views_text(combined_text + "\n" + html)
+        views = _extract_views_number(combined_text + "\n" + html)
         niche = _extract_niche(combined_text)
         years = _extract_years_of_experience(combined_text)
         open_for_work = _detect_open_to_work_text(combined_text)
@@ -916,13 +932,14 @@ def build_column_values(rec: TalentRecord) -> dict:
         MONDAY_COLUMNS["linkedin"]: rec.linkedin or "",
         MONDAY_COLUMNS["ytjobs_profile_link"]: rec.ytjobs_profile_link or "",
         MONDAY_COLUMNS["email"]: rec.email or "",
-        MONDAY_COLUMNS["creators_worked_with"]: rec.creators_worked_with or "",
-        MONDAY_COLUMNS["views"]: rec.views or "",
         MONDAY_COLUMNS["niche"]: rec.niche or "",
     }
 
     if rec.years_of_experience is not None:
         vals[MONDAY_COLUMNS["years_of_experience"]] = rec.years_of_experience
+
+    if rec.views is not None:
+        vals[MONDAY_COLUMNS["views"]] = rec.views
 
     if rec.open_for_work is True:
         vals[MONDAY_COLUMNS["open_for_work"]] = {"checked": True}
@@ -931,6 +948,10 @@ def build_column_values(rec: TalentRecord) -> dict:
 
     if rec.job_role:
         vals[MONDAY_COLUMNS["job_role"]] = {"labels": [rec.job_role]}
+
+    creator_labels = _split_creators_for_dropdown(rec.creators_worked_with)
+    if creator_labels:
+        vals[MONDAY_COLUMNS["creators_worked_with"]] = {"labels": creator_labels}
 
     if MONDAY_COLUMNS["location"]:
         vals[MONDAY_COLUMNS["location"]] = rec.location or ""
