@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, asdict, replace
+from dataclasses import dataclass, asdict, replace, field
 from urllib.parse import urljoin
 
 import httpx
@@ -187,6 +187,7 @@ class TalentRecord:
     location: str = ""
     twitter: str = ""
     youtube: str = ""
+    _profile_text: str = field(default="", repr=False)
 
 
 def _to_absolute(url: str) -> str:
@@ -276,6 +277,7 @@ def _extract_views_number(text: str) -> float | None:
         return None
 
     patterns = [
+        r'<div class="item">\s*(\d+(?:\.\d+)?)\+?\s*([BKM])\s*Views\s*</div>',
         r'>(\d+(?:\.\d+)?)\+?\s*([BKM])\s*Views<',
         r'(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s+views',
         r'(\d+(?:\.\d+)?)\+?\s*([BKM])\s+Views',
@@ -448,11 +450,23 @@ def _role_variants_from_text(primary_role: str | None, text: str) -> list[str]:
     lowered = text.lower()
 
     has_editor = any(x in lowered for x in [
-        " video editor", "editor ", " editor |", "head of post", "post production"
+        "video editor",
+        "head of post",
+        "post production",
+        " editor ",
+        "editor |",
+        "| editor",
+        "joined smile media as an editor",
     ])
     has_manager = any(x in lowered for x in [
-        "channel manager", "youtube manager", "content manager",
-        "head of production", "production manager", "project manager", "manager @"
+        "channel manager",
+        "youtube manager",
+        "content manager",
+        "head of production",
+        "production manager",
+        "project manager",
+        "manage uploads",
+        "i manage uploads",
     ])
 
     if has_editor and "Long-Form Editor" not in roles:
@@ -604,8 +618,18 @@ async def _extract_creators(profile_page: Page) -> str:
                     continue
                 if "subscriber" in lowered:
                     continue
+                if any(x in lowered for x in [
+                    "great communication",
+                    "pleasure to work together",
+                    "dedicated specialist",
+                    "professional",
+                    "excellent",
+                    "always a pleasure",
+                ]):
+                    continue
                 if len(txt) < 2 or len(txt) > 80:
                     continue
+
                 names.append(txt)
                 break
     except Exception:
@@ -624,18 +648,25 @@ async def _extract_location(profile_page: Page) -> str:
             await location_group.click(force=True, timeout=1500)
             await profile_page.wait_for_timeout(1000)
 
-            modal_text = await profile_page.locator("body").inner_text()
-            patterns = [
-                r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[`’']s location is verified",
-                r"\b([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\b",
-            ]
-
-            for pattern in patterns:
-                m = re.search(pattern, modal_text, re.I)
+            location_block = profile_page.locator(".sc-eJXVlN.hPFMFA").last
+            if await location_block.count() > 0:
+                text = await location_block.inner_text(timeout=2000)
+                m = re.search(
+                    r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+                    text,
+                )
                 if m:
-                    location = m.group(1).strip()
-                    if "Talent" not in location and "Public" not in location and len(location) < 80:
-                        return location
+                    return m.group(1).strip()
+
+            body_text = await profile_page.locator("body").inner_text()
+            m = re.search(
+                r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[`’']s location is verified via browser API",
+                body_text,
+                re.I,
+            )
+            if m:
+                return m.group(1).strip()
+
     except Exception:
         pass
 
@@ -666,8 +697,6 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         primary_role = DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(combined_text) or _normalize_role(card["role"])
         creators = await _extract_creators(profile_page)
-        if not creators:
-            creators = _extract_creator_summary(combined_text)
 
         rec = TalentRecord(
             name=card["name"],
@@ -683,6 +712,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
             location=location,
             twitter=twitter,
             youtube=youtube,
+            _profile_text=combined_text,
         )
 
         role_variants = _role_variants_from_text(primary_role, combined_text)
@@ -723,14 +753,14 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
         print(f"CARD: {c['name']} | {c['role']} | {c['href']}")
 
     records: list[TalentRecord] = []
-    seen_links: set[str] = set()
+    seen_record_keys: set[str] = set()
 
     for idx, card in enumerate(cards, start=1):
         if _is_junk_name(card["name"]):
             continue
 
         normalized_link = _normalize_profile_link(card["href"])
-        if not normalized_link or normalized_link in seen_links:
+        if not normalized_link:
             continue
 
         print(f"Scraping [{idx}/{len(cards)}]: {card['name']} | {card['role']}")
@@ -738,44 +768,19 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
         if not rec:
             continue
 
-        role_variants = _role_variants_from_text(
-            rec.job_role,
-            f"{rec.job_role or ''}\n{rec.creators_worked_with}\n{rec.niche}"
-        )
-
-        # Better duplication signal from profile text
-        if rec.job_role:
-            role_variants = [rec.job_role]
-        full_text = await context.new_page()  # not used; avoid extra fetch
-
-        # Duplicate record for additional roles based on profile text
-        # Recompute with stronger text using fetched fields already available
-        inferred_variants = _role_variants_from_text(
-            rec.job_role,
-            f"{card['role']}\n{rec.job_role or ''}\n{rec.niche}\n{rec.creators_worked_with}"
-        )
-
-        # Also use known common mixed-role case for managers/editors
-        if rec.job_role == "Channel Manager" and "Editor" in card["role"]:
-            if "Long-Form Editor" not in inferred_variants:
-                inferred_variants.append("Long-Form Editor")
-        if rec.job_role == "Long-Form Editor" and ("Manager" in card["role"] or "Channel Manager" in card["role"]):
-            if "Channel Manager" not in inferred_variants:
-                inferred_variants.append("Channel Manager")
-
-        inferred_variants = _dedupe_keep_order(inferred_variants)
+        inferred_variants = _role_variants_from_text(rec.job_role, rec._profile_text)
+        if not inferred_variants:
+            inferred_variants = [rec.job_role] if rec.job_role else []
 
         for role in inferred_variants:
+            if not role:
+                continue
             rec_copy = replace(rec, job_role=role)
             dedupe_key = f"{normalized_link}::{role}"
-            if dedupe_key in seen_links:
+            if dedupe_key in seen_record_keys:
                 continue
-            seen_links.add(dedupe_key)
+            seen_record_keys.add(dedupe_key)
             records.append(rec_copy)
-
-        if not inferred_variants:
-            seen_links.add(normalized_link)
-            records.append(rec)
 
         await page.wait_for_timeout(500)
 
@@ -985,7 +990,7 @@ def main() -> None:
     print(f"Total scraped valid records: {len(records)}")
 
     if args.dry_run:
-        for rec in records[:25]:
+        for rec in records[:50]:
             print(json.dumps(asdict(rec), ensure_ascii=False))
         print("Dry run mode enabled; no monday updates sent.")
         return
@@ -996,10 +1001,14 @@ def main() -> None:
     skipped_unmapped = 0
     failed = 0
 
+    # track by profile+role locally so duplicates can still be created
+    created_local_keys: set[str] = set()
+
     for idx, rec in enumerate(records, start=1):
         normalized_link = _normalize_profile_link(rec.ytjobs_profile_link)
+        local_key = f"{normalized_link}::{rec.job_role or ''}"
 
-        if normalized_link in existing:
+        if local_key in created_local_keys:
             skipped_existing += 1
             continue
 
@@ -1024,7 +1033,7 @@ def main() -> None:
 
         try:
             monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
-            existing.add(normalized_link)
+            created_local_keys.add(local_key)
             created += 1
             time.sleep(0.2)
         except Exception as e:
@@ -1032,7 +1041,7 @@ def main() -> None:
             time.sleep(2)
             try:
                 monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
-                existing.add(normalized_link)
+                created_local_keys.add(local_key)
                 created += 1
                 time.sleep(0.2)
             except Exception as e2:
