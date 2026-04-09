@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from urllib.parse import urljoin
 
 import httpx
@@ -276,9 +276,10 @@ def _extract_views_number(text: str) -> float | None:
         return None
 
     patterns = [
-        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s+views",
-        r"(\d+(?:\.\d+)?)\+?\s*([BKM])\s+Views",
-        r"(\d+(?:\.\d+)?)\+?\s*([bkm])\s+views",
+        r'>(\d+(?:\.\d+)?)\+?\s*([BKM])\s*Views<',
+        r'(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s+views',
+        r'(\d+(?:\.\d+)?)\+?\s*([BKM])\s+Views',
+        r'(\d+(?:\.\d+)?)\+?\s*([bkm])\s+views',
     ]
 
     for pattern in patterns:
@@ -433,61 +434,33 @@ def _extract_years_of_experience(text: str) -> float | None:
     return None
 
 
-def _clean_creator_line(line: str) -> str:
-    clean = re.sub(r"\s+", " ", line).strip()
-    clean = re.sub(r"\bVerified\b", "", clean, flags=re.I).strip()
-    clean = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+subscribers?\b", "", clean, flags=re.I).strip()
-    clean = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+videos?\b", "", clean, flags=re.I).strip()
-    clean = re.sub(r"\b\d+(?:\.\d+)?[MBK]?\s+views?\b", "", clean, flags=re.I).strip()
-    return clean.strip(" -•|,")
-
-
-def _extract_creator_summary(text: str) -> str:
-    if not text:
-        return ""
-
-    found = []
-
-    section_patterns = [
-        r"(?:Verified Clients|Clients Worked With|Past Creators|Clients)\s*(.*?)(?:\nClient Reviews|\nVouch|\nExperience|\nAbout|\nPortfolio|$)",
-    ]
-
-    for pattern in section_patterns:
-        for m in re.finditer(pattern, text, re.I | re.S):
-            section = m.group(1)
-            lines = [ln.strip() for ln in section.splitlines() if ln.strip()]
-            for line in lines:
-                clean = _clean_creator_line(line)
-                lowered = clean.lower()
-                if not clean:
-                    continue
-                if lowered in {
-                    "profile",
-                    "timeline",
-                    "posts",
-                    "verified clients",
-                    "clients",
-                    "client reviews",
-                    "vouch",
-                    "portfolio",
-                    "about",
-                    "experience",
-                    "confirmed info",
-                }:
-                    continue
-                if len(clean) < 2 or len(clean) > 60:
-                    continue
-                if re.search(r"subscribers?|reviews?|vouch|videos?|views?", lowered):
-                    continue
-                found.append(clean)
-
-    return ", ".join(_dedupe_keep_order(found)[:10])
-
-
 def _split_creators_for_dropdown(text: str) -> list[str]:
     if not text:
         return []
     return [x.strip() for x in text.split(",") if x.strip()][:20]
+
+
+def _role_variants_from_text(primary_role: str | None, text: str) -> list[str]:
+    roles = []
+    if primary_role:
+        roles.append(primary_role)
+
+    lowered = text.lower()
+
+    has_editor = any(x in lowered for x in [
+        " video editor", "editor ", " editor |", "head of post", "post production"
+    ])
+    has_manager = any(x in lowered for x in [
+        "channel manager", "youtube manager", "content manager",
+        "head of production", "production manager", "project manager", "manager @"
+    ])
+
+    if has_editor and "Long-Form Editor" not in roles:
+        roles.append("Long-Form Editor")
+    if has_manager and "Channel Manager" not in roles:
+        roles.append("Channel Manager")
+
+    return _dedupe_keep_order(roles)
 
 
 async def _accept_cookies(page: Page) -> None:
@@ -613,117 +586,56 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 
 async def _extract_creators(profile_page: Page) -> str:
-    found = []
+    names = []
+    try:
+        slides = profile_page.locator(".swiper-wrapper .swiper-slide")
+        count = await slides.count()
 
-    blocked_contains = [
-        "ytjobs logo",
-        "profile banner",
-        "avatar",
-        "channel logo",
-        "channel medal",
-        "banner",
-        "logo",
-        "medal",
-    ]
+        for i in range(count):
+            slide = slides.nth(i)
+            p_tags = slide.locator("p")
+            p_count = await p_tags.count()
 
-    section_labels = ["Verified Clients", "Clients Worked With", "Past Creators", "Clients"]
+            for j in range(p_count):
+                txt = (await p_tags.nth(j).inner_text()).strip()
+                lowered = txt.lower()
 
-    for label in section_labels:
-        try:
-            header = profile_page.get_by_text(label, exact=True).first
-            if await header.count() == 0:
-                continue
-
-            container = header.locator("xpath=..")
-            text = await container.inner_text(timeout=2000)
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-            for line in lines:
-                lowered = line.lower()
-
-                if any(x in lowered for x in blocked_contains):
+                if not txt:
                     continue
-                if lowered in {
-                    "verified clients",
-                    "clients worked with",
-                    "past creators",
-                    "clients",
-                    "client reviews",
-                    "about",
-                    "experience",
-                    "portfolio",
-                    "confirmed info",
-                    "profile",
-                    "timeline",
-                    "posts",
-                }:
+                if "subscriber" in lowered:
                     continue
-                if re.search(r"subscribers?|views?|videos?|reviews?|vouch", lowered):
+                if len(txt) < 2 or len(txt) > 80:
                     continue
-                if len(line) < 2 or len(line) > 60:
-                    continue
+                names.append(txt)
+                break
+    except Exception:
+        pass
 
-                found.append(line)
-        except Exception:
-            continue
-
-    return ", ".join(_dedupe_keep_order(found)[:15])
+    return ", ".join(_dedupe_keep_order(names)[:20])
 
 
 async def _extract_location(profile_page: Page) -> str:
     try:
-        candidates = profile_page.locator('button, [role="button"], svg, [data-testid], [aria-label]')
-        count = await candidates.count()
+        icon_groups = profile_page.locator(".sc-kVUOzj .sc-cYYrUZ")
+        count = await icon_groups.count()
 
-        for i in range(min(count, 200)):
-            try:
-                el = candidates.nth(i)
-                box = await el.bounding_box()
-                if not box:
-                    continue
+        if count >= 4:
+            location_group = icon_groups.nth(3)
+            await location_group.click(force=True, timeout=1500)
+            await profile_page.wait_for_timeout(1000)
 
-                if not (120 <= box["x"] <= 500 and 450 <= box["y"] <= 950):
-                    continue
+            modal_text = await profile_page.locator("body").inner_text()
+            patterns = [
+                r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[`’']s location is verified",
+                r"\b([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\b",
+            ]
 
-                aria = (await el.get_attribute("aria-label") or "").lower()
-                title = (await el.get_attribute("title") or "").lower()
-
-                looks_like_location = any(
-                    key in aria or key in title
-                    for key in ["location", "map", "pin", "place"]
-                )
-
-                if looks_like_location or (box["width"] <= 40 and box["height"] <= 40):
-                    await el.click(timeout=1000, force=True)
-                    await profile_page.wait_for_timeout(1200)
-
-                    body_text = await profile_page.locator("body").inner_text()
-
-                    patterns = [
-                        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’']s location is verified",
-                        r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
-                        r"\b([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+)\b",
-                    ]
-
-                    for pattern in patterns:
-                        m = re.search(pattern, body_text, re.I)
-                        if m:
-                            location = m.group(1).strip()
-                            if location.lower() not in {
-                                "confirmed info",
-                                "why is this important",
-                            }:
-                                return location
-
-                    try:
-                        await profile_page.keyboard.press("Escape")
-                        await profile_page.wait_for_timeout(300)
-                    except Exception:
-                        pass
-
-            except Exception:
-                continue
-
+            for pattern in patterns:
+                m = re.search(pattern, modal_text, re.I)
+                if m:
+                    location = m.group(1).strip()
+                    if "Talent" not in location and "Public" not in location and len(location) < 80:
+                        return location
     except Exception:
         pass
 
@@ -746,14 +658,13 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         linkedin, twitter, youtube = _extract_social_links(combined_text + "\n" + html)
         email = _extract_public_email(combined_text)
-        views = _extract_views_number(combined_text + "\n" + html)
+        views = _extract_views_number(html + "\n" + combined_text)
         niche = _extract_niche(combined_text)
         years = _extract_years_of_experience(combined_text)
         open_for_work = _detect_open_to_work_text(combined_text)
         location = await _extract_location(profile_page)
 
-        role = DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(combined_text) or _normalize_role(card["role"])
-
+        primary_role = DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(combined_text) or _normalize_role(card["role"])
         creators = await _extract_creators(profile_page)
         if not creators:
             creators = _extract_creator_summary(combined_text)
@@ -767,18 +678,21 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
             open_for_work=open_for_work,
             creators_worked_with=creators,
             views=views,
-            job_role=role,
+            job_role=primary_role,
             niche=niche,
             location=location,
             twitter=twitter,
             youtube=youtube,
         )
 
+        role_variants = _role_variants_from_text(primary_role, combined_text)
+
         print("EMAIL PARSED:", rec.email)
         print("VIEWS PARSED:", rec.views)
         print("CREATORS PARSED:", rec.creators_worked_with)
         print("NICHE PARSED:", rec.niche)
         print("LOCATION PARSED:", rec.location)
+        print("ROLE VARIANTS:", role_variants)
 
         return rec
 
@@ -824,8 +738,45 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
         if not rec:
             continue
 
-        seen_links.add(normalized_link)
-        records.append(rec)
+        role_variants = _role_variants_from_text(
+            rec.job_role,
+            f"{rec.job_role or ''}\n{rec.creators_worked_with}\n{rec.niche}"
+        )
+
+        # Better duplication signal from profile text
+        if rec.job_role:
+            role_variants = [rec.job_role]
+        full_text = await context.new_page()  # not used; avoid extra fetch
+
+        # Duplicate record for additional roles based on profile text
+        # Recompute with stronger text using fetched fields already available
+        inferred_variants = _role_variants_from_text(
+            rec.job_role,
+            f"{card['role']}\n{rec.job_role or ''}\n{rec.niche}\n{rec.creators_worked_with}"
+        )
+
+        # Also use known common mixed-role case for managers/editors
+        if rec.job_role == "Channel Manager" and "Editor" in card["role"]:
+            if "Long-Form Editor" not in inferred_variants:
+                inferred_variants.append("Long-Form Editor")
+        if rec.job_role == "Long-Form Editor" and ("Manager" in card["role"] or "Channel Manager" in card["role"]):
+            if "Channel Manager" not in inferred_variants:
+                inferred_variants.append("Channel Manager")
+
+        inferred_variants = _dedupe_keep_order(inferred_variants)
+
+        for role in inferred_variants:
+            rec_copy = replace(rec, job_role=role)
+            dedupe_key = f"{normalized_link}::{role}"
+            if dedupe_key in seen_links:
+                continue
+            seen_links.add(dedupe_key)
+            records.append(rec_copy)
+
+        if not inferred_variants:
+            seen_links.add(normalized_link)
+            records.append(rec)
+
         await page.wait_for_timeout(500)
 
     print(f"Directory page {page_no} valid records found: {len(records)}")
@@ -989,7 +940,9 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
 
     dedup: dict[str, TalentRecord] = {}
     for rec in all_records:
-        if rec.ytjobs_profile_link:
+        if rec.ytjobs_profile_link and rec.job_role:
+            dedup[f"{_normalize_profile_link(rec.ytjobs_profile_link)}::{rec.job_role}"] = rec
+        elif rec.ytjobs_profile_link:
             dedup[_normalize_profile_link(rec.ytjobs_profile_link)] = rec
 
     return list(dedup.values())
