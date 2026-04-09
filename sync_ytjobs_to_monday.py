@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, asdict, replace, field
+from dataclasses import dataclass, asdict, field
 from urllib.parse import urljoin
 
 import httpx
@@ -44,6 +44,7 @@ ROLE_TO_GROUP_ID = {
     "Scriptwriter": "group_mm22hc00",
     "Thumbnail Designer": "group_mm22jqd",
     "Animator": "group_mm22agrt",
+    "Other": "group_mm28n3kf",
 }
 
 MONDAY_COLUMNS = {
@@ -57,7 +58,7 @@ MONDAY_COLUMNS = {
     "job_role": os.getenv("MONDAY_JOB_ROLE_COLUMN_ID", "dropdown_mm22xt4g"),
     "niche": os.getenv("MONDAY_NICHE_COLUMN_ID", "long_text_mm26cehz"),
     "location": os.getenv("MONDAY_LOCATION_COLUMN_ID", "text_mm27dy8q"),
-    "socials": os.getenv("MONDAY_SOCIALS_COLUMN_ID", "link_mm26njaz"),
+    "socials": os.getenv("MONDAY_SOCIALS_COLUMN_ID", "text_mm26njaz"),
 }
 
 ROLE_ALIASES = {
@@ -109,6 +110,7 @@ ROLE_ALIASES = {
     "motion graphic designer": "Animator",
     "3d animator": "Animator",
     "2d animator": "Animator",
+    "other": "Other",
 }
 
 DISPLAY_ROLE_ALIASES = {
@@ -129,6 +131,7 @@ DISPLAY_ROLE_ALIASES = {
     "Production Manager": "Channel Manager",
     "Project Manager": "Channel Manager",
     "Manager": "Channel Manager",
+    "Other": "Other",
 }
 
 NICHE_KEYWORDS = {
@@ -171,6 +174,12 @@ JUNK_NAME_PATTERNS = [
     r"^loginpost a jobjoin as talent$",
 ]
 
+GENERIC_CREATOR_WORDS = {
+    "about", "portfolio", "experience", "verified clients", "client reviews", "roles",
+    "categories", "confirmed info", "hire me", "open to work", "views", "subscribers",
+    "youtube", "linkedin", "twitter", "x", "instagram", "tiktok", "public", "private",
+}
+
 
 @dataclass
 class TalentRecord:
@@ -186,6 +195,7 @@ class TalentRecord:
     niche: str = ""
     location: str = ""
     twitter: str = ""
+    twitter_handle: str = ""
     youtube: str = ""
     _profile_text: str = field(default="", repr=False)
 
@@ -258,6 +268,21 @@ def _normalize_role(raw: str | None) -> str | None:
 
 
 def _detect_role_from_text(text: str) -> str | None:
+    if not text:
+        return None
+
+    m = re.search(
+        r"Roles\s*(.*?)(?:\nConfirmed info|\nExperience|\nAbout|\nPortfolio|\nVerified Clients|\nClient Reviews|\nCategories|$)",
+        text,
+        re.I | re.S,
+    )
+    if m:
+        lines = [ln.strip() for ln in m.group(1).splitlines() if ln.strip()]
+        for line in lines:
+            normalized = _normalize_role(line)
+            if normalized:
+                return normalized
+
     return _normalize_role(text)
 
 
@@ -272,16 +297,28 @@ def _detect_open_to_work_text(text: str) -> bool | None:
     return None
 
 
+def _parse_compact_number(num_text: str, suffix: str) -> int:
+    num = float(num_text.replace(",", ""))
+    suffix = suffix.lower()
+    if suffix in {"b", "billion"}:
+        num *= 1_000_000_000
+    elif suffix in {"m", "million"}:
+        num *= 1_000_000
+    elif suffix in {"k", "thousand"}:
+        num *= 1_000
+    return round(num)
+
+
 def _extract_views_number(text: str) -> float | None:
     if not text:
         return None
 
     patterns = [
-        r'<div class="item">\s*(\d+(?:\.\d+)?)\+?\s*([BKM])\s*Views\s*</div>',
-        r'>(\d+(?:\.\d+)?)\+?\s*([BKM])\s*Views<',
-        r'(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s+views',
-        r'(\d+(?:\.\d+)?)\+?\s*([BKM])\s+Views',
-        r'(\d+(?:\.\d+)?)\+?\s*([bkm])\s+views',
+        r"(\d+(?:,\d{3})+)\+?\s*views\b",
+        r"(\d+(?:\.\d+)?)\+?\s*([bmk])\s*views\b",
+        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s*views\b",
+        r"views\b[^\d]{0,20}(\d+(?:,\d{3})+)",
+        r"views\b[^\d]{0,20}(\d+(?:\.\d+)?)\s*([bmk])\b",
     ]
 
     for pattern in patterns:
@@ -289,17 +326,13 @@ def _extract_views_number(text: str) -> float | None:
         if not m:
             continue
 
-        num = float(m.group(1).replace(",", ""))
-        suffix = (m.group(2) or "").lower()
+        groups = m.groups()
+        if len(groups) == 1 or (len(groups) > 1 and groups[1] is None):
+            return float(m.group(1).replace(",", ""))
 
-        if suffix in {"billion", "b"}:
-            num *= 1_000_000_000
-        elif suffix in {"million", "m"}:
-            num *= 1_000_000
-        elif suffix in {"thousand", "k"}:
-            num *= 1_000
-
-        return round(num)
+        num_text = m.group(1)
+        suffix = m.group(2)
+        return _parse_compact_number(num_text, suffix)
 
     return None
 
@@ -330,40 +363,78 @@ def _extract_public_email(text: str) -> str:
     return ""
 
 
-def _extract_social_links(text: str) -> tuple[str, str, str]:
+def _clean_social(url: str) -> str:
+    return url.rstrip(".,);]}>\"'")
+
+
+def _extract_twitter_handle(text: str) -> str:
+    if not text:
+        return ""
+
+    patterns = [
+        r"@([A-Za-z0-9_]{2,15})",
+        r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            handle = m.group(1).strip()
+            if handle:
+                return f"@{handle}"
+    return ""
+
+
+def _extract_social_links(text: str) -> tuple[str, str, str, str]:
     linkedin = ""
     twitter = ""
+    twitter_handle = ""
     youtube = ""
 
-    m = re.search(r"https?://(?:www\.)?linkedin\.com/[^\s)>\]]+", text, re.I)
-    if m:
-        linkedin = m.group(0).rstrip(".,)")
+    linkedin_patterns = [
+        r"https?://(?:www\.)?linkedin\.com/[^\s<>\])]+",
+        r"(?:linkedin\.com/[^\s<>\])]+)",
+    ]
+    for pattern in linkedin_patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            linkedin = _clean_social(m.group(0))
+            if not linkedin.startswith("http"):
+                linkedin = "https://" + linkedin
+            break
 
     twitter_patterns = [
         r"https?://(?:www\.)?(?:twitter\.com|x\.com)/[A-Za-z0-9_]+",
-        r"@[A-Za-z0-9_]{2,}",
+        r"(?:twitter\.com|x\.com)/[A-Za-z0-9_]+",
     ]
     for pattern in twitter_patterns:
         m = re.search(pattern, text, re.I)
         if m:
-            raw = m.group(0).rstrip(".,)")
-            twitter = f"https://x.com/{raw[1:]}" if raw.startswith("@") else raw
+            twitter = _clean_social(m.group(0))
+            if not twitter.startswith("http"):
+                twitter = "https://" + twitter
             break
 
+    twitter_handle = _extract_twitter_handle(text)
+
     youtube_patterns = [
-        r"https?://(?:www\.)?youtube\.com/[^\s)>\]]+",
-        r"https?://youtu\.be/[^\s)>\]]+",
+        r"https?://(?:www\.)?youtube\.com/[^\s<>\])]+",
+        r"https?://youtu\.be/[^\s<>\])]+",
+        r"(?:youtube\.com/[^\s<>\])]+)",
     ]
     for pattern in youtube_patterns:
         m = re.search(pattern, text, re.I)
         if m:
-            youtube = m.group(0).rstrip(".,)")
+            youtube = _clean_social(m.group(0))
+            if not youtube.startswith("http"):
+                youtube = "https://" + youtube
             break
 
-    return linkedin, twitter, youtube
+    return linkedin, twitter, twitter_handle, youtube
 
 
-def _pick_primary_social(rec: TalentRecord) -> str:
+def _pick_primary_social_text(rec: TalentRecord) -> str:
+    if rec.twitter_handle:
+        return rec.twitter_handle
     if rec.linkedin:
         return rec.linkedin
     if rec.twitter:
@@ -439,42 +510,53 @@ def _extract_years_of_experience(text: str) -> float | None:
 def _split_creators_for_dropdown(text: str) -> list[str]:
     if not text:
         return []
-    return [x.strip() for x in text.split(",") if x.strip()][:20]
+    parts = [x.strip() for x in text.split(",") if x.strip()]
+    return _dedupe_keep_order(parts)[:20]
 
 
-def _role_variants_from_text(primary_role: str | None, text: str) -> list[str]:
-    roles = []
-    if primary_role:
-        roles.append(primary_role)
+def _looks_like_creator_name(value: str) -> bool:
+    if not value:
+        return False
 
-    lowered = text.lower()
+    v = re.sub(r"\s+", " ", value).strip()
+    lowered = v.lower()
 
-    has_editor = any(x in lowered for x in [
-        "video editor",
-        "head of post",
-        "post production",
-        " editor ",
-        "editor |",
-        "| editor",
-        "joined smile media as an editor",
-    ])
-    has_manager = any(x in lowered for x in [
-        "channel manager",
-        "youtube manager",
-        "content manager",
-        "head of production",
-        "production manager",
-        "project manager",
-        "manage uploads",
-        "i manage uploads",
-    ])
+    bad_phrases = [
+        "verified",
+        "subscribers",
+        "videos",
+        "likes",
+        "views",
+        "great communication",
+        "pleasure to work together",
+        "dedicated specialist",
+        "professional",
+        "excellent",
+        "always a pleasure",
+        "confirmed info",
+        "client reviews",
+        "portfolio",
+        "about",
+        "roles",
+        "experience",
+        "public",
+        "private",
+    ]
 
-    if has_editor and "Long-Form Editor" not in roles:
-        roles.append("Long-Form Editor")
-    if has_manager and "Channel Manager" not in roles:
-        roles.append("Channel Manager")
+    if lowered in GENERIC_CREATOR_WORDS:
+        return False
+    if any(p in lowered for p in bad_phrases):
+        return False
+    if re.search(r"https?://", v, re.I):
+        return False
+    if len(v) < 2 or len(v) > 60:
+        return False
+    if len(v.split()) > 6:
+        return False
+    if re.fullmatch(r"[\d.,+\- ]+", v):
+        return False
 
-    return _dedupe_keep_order(roles)
+    return True
 
 
 async def _accept_cookies(page: Page) -> None:
@@ -599,78 +681,200 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
     return combined_text, html
 
 
-async def _extract_creators(profile_page: Page) -> str:
-    names = []
+async def _open_confirmed_info_modal(profile_page: Page) -> bool:
+    candidates = [
+        profile_page.get_by_text("Confirmed info", exact=True),
+        profile_page.get_by_text("Confirmed info", exact=False),
+    ]
+
+    for locator in candidates:
+        try:
+            count = await locator.count()
+        except Exception:
+            count = 0
+
+        for i in range(min(count, 3)):
+            try:
+                await locator.nth(i).click(timeout=1500)
+                await profile_page.wait_for_timeout(600)
+                if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
+                    return True
+                if await profile_page.get_by_text("Talent’s location is verified via browser API.", exact=False).count() > 0:
+                    return True
+            except Exception:
+                continue
+
+    icon_locators = [
+        profile_page.locator("svg"),
+        profile_page.locator('[class*="confirmed"]'),
+    ]
+
+    for locator in icon_locators:
+        try:
+            count = await locator.count()
+        except Exception:
+            count = 0
+
+        for i in range(min(count, 20)):
+            try:
+                await locator.nth(i).click(timeout=700)
+                await profile_page.wait_for_timeout(400)
+                if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
+                    return True
+                if await profile_page.get_by_text("Talent’s location is verified via browser API.", exact=False).count() > 0:
+                    return True
+            except Exception:
+                continue
+
+    return False
+
+
+async def _close_modal_if_open(profile_page: Page) -> None:
+    close_candidates = [
+        profile_page.get_by_text("×", exact=True),
+        profile_page.locator('[aria-label="Close"]'),
+        profile_page.locator("button"),
+    ]
+
+    for locator in close_candidates:
+        try:
+            count = await locator.count()
+        except Exception:
+            count = 0
+
+        for i in range(min(count, 5)):
+            try:
+                txt = ""
+                try:
+                    txt = (await locator.nth(i).inner_text(timeout=500)).strip()
+                except Exception:
+                    pass
+
+                if txt == "×" or txt == "✕" or txt == "X" or txt == "":
+                    await locator.nth(i).click(timeout=700)
+                    await profile_page.wait_for_timeout(300)
+                    return
+            except Exception:
+                continue
+
     try:
-        slides = profile_page.locator(".swiper-wrapper .swiper-slide")
-        count = await slides.count()
-
-        for i in range(count):
-            slide = slides.nth(i)
-            p_tags = slide.locator("p")
-            p_count = await p_tags.count()
-
-            for j in range(p_count):
-                txt = (await p_tags.nth(j).inner_text()).strip()
-                lowered = txt.lower()
-
-                if not txt:
-                    continue
-                if "subscriber" in lowered:
-                    continue
-                if any(x in lowered for x in [
-                    "great communication",
-                    "pleasure to work together",
-                    "dedicated specialist",
-                    "professional",
-                    "excellent",
-                    "always a pleasure",
-                ]):
-                    continue
-                if len(txt) < 2 or len(txt) > 80:
-                    continue
-
-                names.append(txt)
-                break
+        await profile_page.keyboard.press("Escape")
+        await profile_page.wait_for_timeout(200)
     except Exception:
         pass
+
+
+async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
+    if not await _open_confirmed_info_modal(profile_page):
+        return ""
+
+    modal_text = ""
+    try:
+        possible_modal_roots = [
+            profile_page.locator('[role="dialog"]').last,
+            profile_page.locator("body"),
+        ]
+        for root in possible_modal_roots:
+            try:
+                txt = await root.inner_text(timeout=1500)
+                if "Why is this important?" in txt or "Talent’s location is verified via browser API." in txt:
+                    modal_text = txt
+                    break
+            except Exception:
+                continue
+    finally:
+        await _close_modal_if_open(profile_page)
+
+    return modal_text
+
+
+async def _extract_creators(profile_page: Page, combined_text: str) -> str:
+    names = []
+
+    selectors = [
+        ".swiper-wrapper .swiper-slide",
+        '[class*="swiper-slide"]',
+        'div:has(> img)',
+    ]
+
+    for selector in selectors:
+        try:
+            nodes = profile_page.locator(selector)
+            count = await nodes.count()
+            for i in range(min(count, 100)):
+                text = (await nodes.nth(i).inner_text(timeout=1000)).strip()
+                if not text:
+                    continue
+                for line in text.splitlines():
+                    line = line.strip()
+                    if _looks_like_creator_name(line):
+                        names.append(line)
+                        break
+        except Exception:
+            pass
+
+    m = re.search(
+        r"Verified Clients\s*(.*?)(?:\nClient Reviews|\nRoles|\nCategories|\nExperience|\nAbout|\nPortfolio|$)",
+        combined_text,
+        re.I | re.S,
+    )
+    if m:
+        lines = [ln.strip() for ln in m.group(1).splitlines() if ln.strip()]
+        for line in lines:
+            if _looks_like_creator_name(line):
+                names.append(line)
+
+    m2 = re.search(
+        r"Clients\s*(.*?)(?:\nTimeline|\nPosts|\nClient Reviews|\nRoles|\nCategories|\nExperience|\nAbout|\nPortfolio|$)",
+        combined_text,
+        re.I | re.S,
+    )
+    if m2:
+        lines = [ln.strip() for ln in m2.group(1).splitlines() if ln.strip()]
+        for line in lines:
+            if _looks_like_creator_name(line):
+                names.append(line)
 
     return ", ".join(_dedupe_keep_order(names)[:20])
 
 
-async def _extract_location(profile_page: Page) -> str:
-    try:
-        icon_groups = profile_page.locator(".sc-kVUOzj .sc-cYYrUZ")
-        count = await icon_groups.count()
+async def _extract_location(profile_page: Page, combined_text: str) -> str:
+    patterns = [
+        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[`’']s location is verified via browser API",
+        r"Location\s*[:\-]?\s*([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+        r"Based in\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+    ]
 
-        if count >= 4:
-            location_group = icon_groups.nth(3)
-            await location_group.click(force=True, timeout=1500)
-            await profile_page.wait_for_timeout(1000)
+    modal_text = await _extract_confirmed_info_modal_text(profile_page)
+    for pattern in patterns:
+        m = re.search(pattern, modal_text, re.I)
+        if m:
+            return m.group(1).strip()
 
-            location_block = profile_page.locator(".sc-eJXVlN.hPFMFA").last
-            if await location_block.count() > 0:
-                text = await location_block.inner_text(timeout=2000)
-                m = re.search(
-                    r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
-                    text,
-                )
-                if m:
-                    return m.group(1).strip()
-
-            body_text = await profile_page.locator("body").inner_text()
-            m = re.search(
-                r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[`’']s location is verified via browser API",
-                body_text,
-                re.I,
-            )
-            if m:
-                return m.group(1).strip()
-
-    except Exception:
-        pass
+    for pattern in patterns:
+        m = re.search(pattern, combined_text, re.I)
+        if m:
+            return m.group(1).strip()
 
     return ""
+
+
+async def _extract_modal_socials(profile_page: Page) -> tuple[str, str]:
+    modal_text = await _extract_confirmed_info_modal_text(profile_page)
+    twitter_handle = _extract_twitter_handle(modal_text)
+    youtube = ""
+
+    youtube_patterns = [
+        r"https?://(?:www\.)?youtube\.com/[^\s<>\])]+",
+        r"https?://youtu\.be/[^\s<>\])]+",
+    ]
+    for pattern in youtube_patterns:
+        m = re.search(pattern, modal_text, re.I)
+        if m:
+            youtube = _clean_social(m.group(0))
+            break
+
+    return twitter_handle, youtube
 
 
 async def _scrape_profile(context, card: dict) -> TalentRecord | None:
@@ -687,16 +891,27 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         combined_text, html = await _collect_profile_text(profile_page)
 
-        linkedin, twitter, youtube = _extract_social_links(combined_text + "\n" + html)
+        linkedin, twitter, twitter_handle, youtube = _extract_social_links(combined_text + "\n" + html)
+        modal_twitter_handle, modal_youtube = await _extract_modal_socials(profile_page)
+        if modal_twitter_handle:
+            twitter_handle = modal_twitter_handle
+        if modal_youtube and not youtube:
+            youtube = modal_youtube
+
         email = _extract_public_email(combined_text)
-        views = _extract_views_number(html + "\n" + combined_text)
+        views = _extract_views_number(combined_text + "\n" + html)
         niche = _extract_niche(combined_text)
         years = _extract_years_of_experience(combined_text)
         open_for_work = _detect_open_to_work_text(combined_text)
-        location = await _extract_location(profile_page)
+        location = await _extract_location(profile_page, combined_text)
 
-        primary_role = DISPLAY_ROLE_ALIASES.get(card["role"]) or _detect_role_from_text(combined_text) or _normalize_role(card["role"])
-        creators = await _extract_creators(profile_page)
+        primary_role = (
+            DISPLAY_ROLE_ALIASES.get(card["role"])
+            or _detect_role_from_text(combined_text)
+            or _normalize_role(card["role"])
+        )
+
+        creators = await _extract_creators(profile_page, combined_text)
 
         rec = TalentRecord(
             name=card["name"],
@@ -711,18 +926,18 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
             niche=niche,
             location=location,
             twitter=twitter,
+            twitter_handle=twitter_handle,
             youtube=youtube,
             _profile_text=combined_text,
         )
-
-        role_variants = _role_variants_from_text(primary_role, combined_text)
 
         print("EMAIL PARSED:", rec.email)
         print("VIEWS PARSED:", rec.views)
         print("CREATORS PARSED:", rec.creators_worked_with)
         print("NICHE PARSED:", rec.niche)
         print("LOCATION PARSED:", rec.location)
-        print("ROLE VARIANTS:", role_variants)
+        print("TWITTER HANDLE PARSED:", rec.twitter_handle)
+        print("ROLE PARSED:", rec.job_role)
 
         return rec
 
@@ -768,19 +983,12 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
         if not rec:
             continue
 
-        inferred_variants = _role_variants_from_text(rec.job_role, rec._profile_text)
-        if not inferred_variants:
-            inferred_variants = [rec.job_role] if rec.job_role else []
+        dedupe_key = normalized_link
+        if dedupe_key in seen_record_keys:
+            continue
 
-        for role in inferred_variants:
-            if not role:
-                continue
-            rec_copy = replace(rec, job_role=role)
-            dedupe_key = f"{normalized_link}::{role}"
-            if dedupe_key in seen_record_keys:
-                continue
-            seen_record_keys.add(dedupe_key)
-            records.append(rec_copy)
+        seen_record_keys.add(dedupe_key)
+        records.append(rec)
 
         await page.wait_for_timeout(500)
 
@@ -889,6 +1097,8 @@ def build_column_values(rec: TalentRecord) -> dict:
         MONDAY_COLUMNS["ytjobs_profile_link"]: rec.ytjobs_profile_link or "",
         MONDAY_COLUMNS["email"]: rec.email or "",
         MONDAY_COLUMNS["niche"]: rec.niche or "",
+        MONDAY_COLUMNS["location"]: rec.location or "",
+        MONDAY_COLUMNS["socials"]: _pick_primary_social_text(rec),
     }
 
     if rec.years_of_experience is not None:
@@ -908,13 +1118,6 @@ def build_column_values(rec: TalentRecord) -> dict:
     creator_labels = _split_creators_for_dropdown(rec.creators_worked_with)
     if creator_labels:
         vals[MONDAY_COLUMNS["creators_worked_with"]] = {"labels": creator_labels}
-
-    if MONDAY_COLUMNS["location"]:
-        vals[MONDAY_COLUMNS["location"]] = rec.location or ""
-
-    social_url = _pick_primary_social(rec)
-    if social_url:
-        vals[MONDAY_COLUMNS["socials"]] = {"url": social_url, "text": "Profile"}
 
     return vals
 
@@ -945,9 +1148,7 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
 
     dedup: dict[str, TalentRecord] = {}
     for rec in all_records:
-        if rec.ytjobs_profile_link and rec.job_role:
-            dedup[f"{_normalize_profile_link(rec.ytjobs_profile_link)}::{rec.job_role}"] = rec
-        elif rec.ytjobs_profile_link:
+        if rec.ytjobs_profile_link:
             dedup[_normalize_profile_link(rec.ytjobs_profile_link)] = rec
 
     return list(dedup.values())
@@ -1001,15 +1202,19 @@ def main() -> None:
     skipped_unmapped = 0
     failed = 0
 
-    # track by profile+role locally so duplicates can still be created
     created_local_keys: set[str] = set()
 
     for idx, rec in enumerate(records, start=1):
         normalized_link = _normalize_profile_link(rec.ytjobs_profile_link)
-        local_key = f"{normalized_link}::{rec.job_role or ''}"
+        local_key = normalized_link
 
         if local_key in created_local_keys:
             skipped_existing += 1
+            continue
+
+        if normalized_link in existing:
+            skipped_existing += 1
+            print(f"[{idx}] Skipping existing monday item: {rec.name} | {normalized_link}")
             continue
 
         if args.open_for_work_only and rec.open_for_work is not True:
@@ -1028,12 +1233,14 @@ def main() -> None:
         print(
             f"[{idx}] Creating: {rec.name} | role={rec.job_role} | group={group_id} | "
             f"open_for_work={rec.open_for_work} | niche={rec.niche} | views={rec.views} | "
-            f"email={rec.email} | location={rec.location} | creators={rec.creators_worked_with}"
+            f"email={rec.email} | location={rec.location} | creators={rec.creators_worked_with} | "
+            f"social={_pick_primary_social_text(rec)}"
         )
 
         try:
             monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
             created_local_keys.add(local_key)
+            existing.add(normalized_link)
             created += 1
             time.sleep(0.2)
         except Exception as e:
@@ -1042,6 +1249,7 @@ def main() -> None:
             try:
                 monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
                 created_local_keys.add(local_key)
+                existing.add(normalized_link)
                 created += 1
                 time.sleep(0.2)
             except Exception as e2:
