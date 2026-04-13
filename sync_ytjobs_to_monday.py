@@ -204,7 +204,7 @@ class TalentRecord:
 def _to_absolute(url: str) -> str:
     if not url:
         return ""
-    if url.startswith("http://") or url.startswith("https://"):
+    if url.startswith(("http://", "https://")):
         return url
     if url.startswith("/"):
         return f"{YTJOBS_BASE}{url}"
@@ -368,17 +368,14 @@ def _clean_social(url: str) -> str:
 def _extract_twitter_handle(text: str) -> str:
     if not text:
         return ""
-
     text_without_emails = re.sub(
         r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
         " ",
-        text
+        text,
     )
-
     m = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})\b", text_without_emails, re.I)
     if m:
         return f"@{m.group(1)}"
-
     return ""
 
 
@@ -438,13 +435,7 @@ def _extract_social_links(text: str) -> tuple[str, str, str, str]:
 def _pick_primary_social_text(rec: TalentRecord) -> str:
     if rec.twitter_handle:
         return rec.twitter_handle
-    if rec.linkedin:
-        return rec.linkedin
-    if rec.twitter:
-        return rec.twitter
-    if rec.youtube:
-        return rec.youtube
-    return rec.ytjobs_profile_link
+    return ""
 
 
 def _extract_niche(text: str) -> str:
@@ -654,44 +645,38 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
     try:
-        heading = profile_page.get_by_text("Confirmed info", exact=True).first
-        if await heading.count() > 0:
-            for xpath in [
-                "xpath=ancestor::div[1]",
-                "xpath=ancestor::div[2]",
-                "xpath=ancestor::div[3]",
-                "xpath=ancestor::section[1]",
-            ]:
-                try:
-                    target = heading.locator(xpath)
-                    await target.click(timeout=2000, force=True)
-                    await profile_page.wait_for_timeout(800)
-                    body_text = await profile_page.locator("body").inner_text()
-                    if "Why is this important?" in body_text and "Confirmed info" in body_text:
-                        return True
-                except Exception:
-                    continue
-    except Exception:
-        pass
-
-    try:
         opened = await profile_page.evaluate("""
         () => {
-            const nodes = Array.from(document.querySelectorAll('div, section'));
-            const match = nodes.find(el => (el.innerText || '').trim() === 'Confirmed info');
-            if (!match) return false;
+            const all = Array.from(document.querySelectorAll('div, section, button, a'));
+            const candidates = all.filter(el => {
+                const txt = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                return txt.includes('Confirmed info');
+            });
 
-            let target = match;
-            for (let i = 0; i < 3 && target.parentElement; i++) {
-                target = target.parentElement;
+            for (const el of candidates) {
+                let node = el;
+                for (let i = 0; i < 5 && node; i++) {
+                    const role = node.getAttribute && node.getAttribute('role');
+                    const tag = (node.tagName || '').toLowerCase();
+                    const clickable =
+                        tag === 'button' ||
+                        tag === 'a' ||
+                        role === 'button' ||
+                        typeof node.onclick === 'function' ||
+                        window.getComputedStyle(node).cursor === 'pointer';
+
+                    if (clickable) {
+                        node.click();
+                        return true;
+                    }
+                    node = node.parentElement;
+                }
             }
-
-            target.click();
-            return true;
+            return false;
         }
         """)
         if opened:
-            await profile_page.wait_for_timeout(800)
+            await profile_page.wait_for_timeout(1000)
             body_text = await profile_page.locator("body").inner_text()
             if "Why is this important?" in body_text and "Confirmed info" in body_text:
                 return True
@@ -754,6 +739,8 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
             try:
                 txt = await loc.inner_text(timeout=2500)
                 if txt and "Confirmed info" in txt and "Why is this important?" in txt:
+                    print("CONFIRMED INFO MODAL TEXT:")
+                    print(txt[:1500])
                     return txt
             except Exception:
                 continue
@@ -763,12 +750,9 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
         await _close_modal_if_open(profile_page)
 
 
-def _extract_socials_from_confirmed_modal(modal_text: str) -> tuple[str, str]:
+def _extract_socials_from_confirmed_modal(modal_text: str) -> str:
     if not modal_text:
-        return "", ""
-
-    twitter_handle = ""
-    youtube_url = ""
+        return ""
 
     patterns = [
         r"Public\s+@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal twitter account is verified via Twitter API",
@@ -778,14 +762,26 @@ def _extract_socials_from_confirmed_modal(modal_text: str) -> tuple[str, str]:
     for pattern in patterns:
         m = re.search(pattern, modal_text, re.I | re.S)
         if m:
-            twitter_handle = f"@{m.group(1)}"
-            break
+            return f"@{m.group(1)}"
 
-    m = re.search(r"https?://(?:www\.)?youtube\.com/[^\s<>\])\"']+", modal_text, re.I)
-    if m:
-        youtube_url = _clean_social(m.group(0))
+    return ""
 
-    return twitter_handle, youtube_url
+
+def _extract_location_from_confirmed_modal(modal_text: str) -> str:
+    if not modal_text:
+        return ""
+
+    patterns = [
+        r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
+        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, modal_text, re.I | re.S)
+        if m:
+            return re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+
+    return ""
 
 
 async def _extract_top_views(profile_page: Page) -> float | None:
@@ -878,25 +874,6 @@ async def _extract_creators(profile_page: Page, combined_text: str) -> str:
     return ", ".join(final_names[:20])
 
 
-def _extract_location_from_confirmed_modal(modal_text: str) -> str:
-    if not modal_text:
-        return ""
-
-    patterns = [
-        r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
-        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, modal_text, re.I | re.S)
-        if m:
-            value = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
-            if 1 <= len(value) <= 80:
-                return value
-
-    return ""
-
-
 async def _scrape_profile(context, card: dict) -> TalentRecord | None:
     profile_url = _normalize_profile_link(card["href"])
     if not profile_url:
@@ -915,15 +892,13 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         linkedin, twitter, twitter_handle, youtube = _extract_social_links(full_text)
 
-        modal_twitter_handle, modal_youtube = _extract_socials_from_confirmed_modal(confirmed_modal_text)
+        modal_twitter_handle = _extract_socials_from_confirmed_modal(confirmed_modal_text)
         if modal_twitter_handle:
             twitter_handle = modal_twitter_handle
-            twitter = f"https://x.com/{modal_twitter_handle.lstrip('@')}"
         else:
             twitter_handle = ""
 
-        if modal_youtube and not youtube:
-            youtube = modal_youtube
+        twitter = ""
 
         email = _extract_public_email(full_text)
         top_views = await _extract_top_views(profile_page)
