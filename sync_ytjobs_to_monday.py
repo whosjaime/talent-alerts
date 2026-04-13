@@ -644,44 +644,33 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
-    try:
-        opened = await profile_page.evaluate("""
-        () => {
-            const all = Array.from(document.querySelectorAll('div, section, button, a'));
-            const candidates = all.filter(el => {
-                const txt = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
-                return txt.includes('Confirmed info');
-            });
+    locators = [
+        profile_page.locator("div", has_text="Confirmed info"),
+        profile_page.locator("section", has_text="Confirmed info"),
+        profile_page.locator("[role='button']", has_text="Confirmed info"),
+        profile_page.locator("button", has_text="Confirmed info"),
+    ]
 
-            for (const el of candidates) {
-                let node = el;
-                for (let i = 0; i < 5 && node; i++) {
-                    const role = node.getAttribute && node.getAttribute('role');
-                    const tag = (node.tagName || '').toLowerCase();
-                    const clickable =
-                        tag === 'button' ||
-                        tag === 'a' ||
-                        role === 'button' ||
-                        typeof node.onclick === 'function' ||
-                        window.getComputedStyle(node).cursor === 'pointer';
+    for locator in locators:
+        try:
+            count = await locator.count()
+        except Exception:
+            count = 0
 
-                    if (clickable) {
-                        node.click();
-                        return true;
-                    }
-                    node = node.parentElement;
-                }
-            }
-            return false;
-        }
-        """)
-        if opened:
-            await profile_page.wait_for_timeout(1000)
-            body_text = await profile_page.locator("body").inner_text()
-            if "Why is this important?" in body_text and "Confirmed info" in body_text:
-                return True
-    except Exception:
-        pass
+        for i in range(min(count, 10)):
+            try:
+                target = locator.nth(i)
+                await target.scroll_into_view_if_needed()
+                await profile_page.wait_for_timeout(200)
+                await target.click(timeout=3000, force=True)
+                await profile_page.wait_for_timeout(1200)
+
+                body_text = await profile_page.locator("body").inner_text()
+                if "Why is this important?" in body_text and "Confirmed info" in body_text:
+                    print("Confirmed info modal opened.")
+                    return True
+            except Exception:
+                continue
 
     print("Could not open Confirmed info modal.")
     return False
@@ -892,12 +881,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         linkedin, twitter, twitter_handle, youtube = _extract_social_links(full_text)
 
-        modal_twitter_handle = _extract_socials_from_confirmed_modal(confirmed_modal_text)
-        if modal_twitter_handle:
-            twitter_handle = modal_twitter_handle
-        else:
-            twitter_handle = ""
-
+        twitter_handle = _extract_socials_from_confirmed_modal(confirmed_modal_text)
         twitter = ""
 
         email = _extract_public_email(full_text)
