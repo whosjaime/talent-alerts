@@ -53,12 +53,12 @@ MONDAY_COLUMNS = {
     "email": os.getenv("MONDAY_EMAIL_COLUMN_ID", "text_mm2028sd"),
     "years_of_experience": os.getenv("MONDAY_YOE_COLUMN_ID", "numeric_mm20gyp"),
     "open_for_work": os.getenv("MONDAY_OPEN_FOR_WORK_COLUMN_ID", "boolean_mm20xkyn"),
-    "creators_worked_with": os.getenv("MONDAY_CREATORS_WORKED_WITH_COLUMN_ID", "dropdown_mm20xxmt"),
-    "views": os.getenv("MONDAY_VIEWS_COLUMN_ID", "numeric_mm20rjas"),
+    "creators_worked_with": os.getenv("MONDAY_CREATORS_WORKED_WITH_COLUMN_ID", "long_text_mm27zpbz"),
+    "views": os.getenv("MONDAY_VIEWS_COLUMN_ID", "text_mm27hzep"),
     "job_role": os.getenv("MONDAY_JOB_ROLE_COLUMN_ID", "dropdown_mm22xt4g"),
     "niche": os.getenv("MONDAY_NICHE_COLUMN_ID", "long_text_mm26cehz"),
     "location": os.getenv("MONDAY_LOCATION_COLUMN_ID", "text_mm27dy8q"),
-    "socials": os.getenv("MONDAY_SOCIALS_COLUMN_ID", "text_mm26njaz"),
+    "socials": os.getenv("MONDAY_SOCIALS_COLUMN_ID", "text_mm2c57z4"),
 }
 
 ROLE_ALIASES = {
@@ -178,7 +178,7 @@ GENERIC_CREATOR_WORDS = {
     "about", "portfolio", "experience", "verified clients", "client reviews", "roles",
     "categories", "confirmed info", "hire me", "open to work", "views", "subscribers",
     "youtube", "linkedin", "twitter", "x", "instagram", "tiktok", "public", "private",
-    "videos", "likes", "profile", "clients", "timeline", "posts",
+    "videos", "likes", "profile", "clients", "timeline", "posts", "see more",
 }
 
 
@@ -317,13 +317,9 @@ def _extract_views_number(text: str) -> float | None:
     text = re.sub(r"\s+", " ", text).strip()
 
     patterns = [
-        r"(\d+(?:,\d{3})+)\+?\s*(?:total\s+)?views\b",
-        r"(\d+(?:\.\d+)?)\+?\s*([bmk])\s*(?:total\s+)?views\b",
-        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s*(?:total\s+)?views\b",
-        r"(?:total\s+views|views)\s*[:\-]?\s*(\d+(?:,\d{3})+)",
-        r"(?:total\s+views|views)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([bmk])\b",
-        r"(?:channel\s+views|lifetime\s+views)\s*[:\-]?\s*(\d+(?:,\d{3})+)",
-        r"(?:channel\s+views|lifetime\s+views)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([bmk])\b",
+        r"(\d+(?:,\d{3})+)\+?\s*views\b",
+        r"(\d+(?:\.\d+)?)\+?\s*([bmk])\s*views\b",
+        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s*views\b",
     ]
 
     for pattern in patterns:
@@ -373,18 +369,25 @@ def _extract_twitter_handle(text: str) -> str:
     if not text:
         return ""
 
+    text_without_emails = re.sub(
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        " ",
+        text
+    )
+
     patterns = [
-        r"@([A-Za-z0-9_]{2,15})",
-        r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})",
+        r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})\b",
+        r"(?<![A-Za-z0-9._%+-])@([A-Za-z0-9_]{2,15})\b",
     ]
+
     for pattern in patterns:
-        m = re.search(pattern, text, re.I)
+        m = re.search(pattern, text_without_emails, re.I)
         if m:
             handle = m.group(1).strip()
             if handle:
                 return f"@{handle}"
-    return ""
 
+    return ""
 
 def _extract_social_links(text: str) -> tuple[str, str, str, str]:
     linkedin = ""
@@ -509,13 +512,6 @@ def _extract_years_of_experience(text: str) -> float | None:
     return None
 
 
-def _split_creators_for_dropdown(text: str) -> list[str]:
-    if not text:
-        return []
-    parts = [x.strip() for x in text.split(",") if x.strip()]
-    return _dedupe_keep_order(parts)[:20]
-
-
 def _looks_like_creator_name(value: str) -> bool:
     if not value:
         return False
@@ -546,6 +542,7 @@ def _looks_like_creator_name(value: str) -> bool:
         "profile",
         "timeline",
         "posts",
+        "see more",
     ]
 
     if lowered in GENERIC_CREATOR_WORDS:
@@ -562,26 +559,6 @@ def _looks_like_creator_name(value: str) -> bool:
         return False
 
     return True
-
-
-def _extract_location_from_text(text: str) -> str:
-    if not text:
-        return ""
-
-    patterns = [
-        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
-        r"location(?: is)?(?: verified)?\s*[:\-]?\s*([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
-        r"based in\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
-        r"located in\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
-        r"\b([A-Z][A-Za-z .'\-]+,\s*[A-Z]{2})\b",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, text, re.I)
-        if m:
-            return re.sub(r"\s+", " ", m.group(1)).strip()
-
-    return ""
 
 
 async def _accept_cookies(page: Page) -> None:
@@ -833,15 +810,13 @@ async def _extract_location_from_icon(profile_page: Page) -> str:
         profile_page.locator("button svg"),
     ]
 
-    checked = 0
-
     for svg_locator in icon_candidates:
         try:
             count = await svg_locator.count()
         except Exception:
             count = 0
 
-        for i in range(min(count, 60)):
+        for i in range(min(count, 80)):
             try:
                 svg = svg_locator.nth(i)
                 outer_html = await svg.evaluate("(el) => el.outerHTML")
@@ -856,7 +831,6 @@ async def _extract_location_from_icon(profile_page: Page) -> str:
             if not looks_like_location:
                 continue
 
-            checked += 1
             try:
                 clickable = svg.locator("xpath=ancestor::*[self::button or @role='button' or self::div][1]")
                 await clickable.click(timeout=1500)
@@ -882,15 +856,9 @@ async def _extract_location_from_icon(profile_page: Page) -> str:
                 await _close_modal_if_open(profile_page)
                 return match.group(1).strip()
 
-            fallback = _extract_location_from_text(body_text)
-            if fallback:
-                await _close_modal_if_open(profile_page)
-                return fallback
-
             await _close_modal_if_open(profile_page)
 
-    if checked == 0:
-        print("No matching location icon found.")
+    print("No matching location icon found.")
     return ""
 
 
@@ -953,7 +921,7 @@ async def _extract_creators(profile_page: Page, combined_text: str) -> str:
 
     blocked = {
         "Verified Clients", "Portfolio", "Profile", "Clients", "Timeline", "Posts",
-        "Videos", "Views", "Likes", "Channel Manager", "Video Editor", "Recommended",
+        "Videos", "Views", "Likes", "Channel Manager", "Video Editor", "Recommended", "see more",
     }
 
     final_names = []
@@ -1000,7 +968,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         location = await _extract_location_from_icon(profile_page)
         if not location:
-            location = _extract_location_from_text(full_text)
+            location = ""
 
         primary_role = (
             DISPLAY_ROLE_ALIASES.get(card["role"])
@@ -1196,13 +1164,14 @@ def build_column_values(rec: TalentRecord) -> dict:
         MONDAY_COLUMNS["niche"]: rec.niche or "",
         MONDAY_COLUMNS["location"]: rec.location or "",
         MONDAY_COLUMNS["socials"]: _pick_primary_social_text(rec),
+        MONDAY_COLUMNS["creators_worked_with"]: rec.creators_worked_with or "",
     }
 
     if rec.years_of_experience is not None:
         vals[MONDAY_COLUMNS["years_of_experience"]] = rec.years_of_experience
 
     if rec.views is not None:
-        vals[MONDAY_COLUMNS["views"]] = rec.views
+        vals[MONDAY_COLUMNS["views"]] = str(int(rec.views))
 
     if rec.open_for_work is True:
         vals[MONDAY_COLUMNS["open_for_work"]] = {"checked": True}
@@ -1211,10 +1180,6 @@ def build_column_values(rec: TalentRecord) -> dict:
 
     if rec.job_role:
         vals[MONDAY_COLUMNS["job_role"]] = {"labels": [rec.job_role]}
-
-    creator_labels = _split_creators_for_dropdown(rec.creators_worked_with)
-    if creator_labels:
-        vals[MONDAY_COLUMNS["creators_worked_with"]] = {"labels": creator_labels}
 
     return vals
 
@@ -1333,6 +1298,7 @@ def main() -> None:
             f"email={rec.email} | location={rec.location} | creators={rec.creators_worked_with} | "
             f"social={_pick_primary_social_text(rec)}"
         )
+        print("MONDAY COLUMN VALUES:", json.dumps(values, ensure_ascii=False))
 
         try:
             monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
