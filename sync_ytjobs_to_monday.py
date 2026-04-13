@@ -643,70 +643,129 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
     return combined_text, html
 
 
-async def _open_confirmed_info_modal(profile_page: Page) -> bool:
-    locators = [
-        profile_page.locator("div", has_text="Confirmed info"),
-        profile_page.locator("section", has_text="Confirmed info"),
-        profile_page.locator("[role='button']", has_text="Confirmed info"),
-        profile_page.locator("button", has_text="Confirmed info"),
+async def _wait_for_confirmed_info_dialog(profile_page: Page) -> bool:
+    candidates = [
+        profile_page.locator('[role="dialog"]').last,
+        profile_page.locator('[aria-modal="true"]').last,
     ]
 
-    for locator in locators:
+    for locator in candidates:
         try:
-            count = await locator.count()
-        except Exception:
-            count = 0
-
-        for i in range(min(count, 10)):
-            try:
-                target = locator.nth(i)
-                await target.scroll_into_view_if_needed()
-                await profile_page.wait_for_timeout(200)
-                await target.click(timeout=3000, force=True)
-                await profile_page.wait_for_timeout(1200)
-
-                body_text = await profile_page.locator("body").inner_text()
-                if "Why is this important?" in body_text and "Confirmed info" in body_text:
-                    print("Confirmed info modal opened.")
-                    return True
-            except Exception:
+            if await locator.count() == 0:
                 continue
+            await locator.wait_for(state="visible", timeout=2500)
+            txt = await locator.inner_text(timeout=1500)
+            if txt and "Confirmed info" in txt:
+                return True
+        except Exception:
+            continue
 
-    print("Could not open Confirmed info modal.")
+    try:
+        body_text = await profile_page.locator("body").inner_text(timeout=1500)
+        if "Confirmed info" in body_text and "Why is this important?" in body_text:
+            return True
+    except Exception:
+        pass
+
     return False
 
 
-async def _close_modal_if_open(profile_page: Page) -> None:
-    close_candidates = [
-        profile_page.get_by_text("×", exact=True),
-        profile_page.locator('[aria-label="Close"]'),
-        profile_page.locator("button"),
+async def _click_confirmed_info_candidate(profile_page: Page, candidate) -> bool:
+    try:
+        await candidate.scroll_into_view_if_needed()
+    except Exception:
+        pass
+
+    await profile_page.wait_for_timeout(250)
+
+    click_attempts = [
+        lambda: candidate.click(timeout=2000),
+        lambda: candidate.click(timeout=2000, force=True),
+        lambda: candidate.evaluate(
+            """
+            (el) => {
+                const target =
+                    el.closest('button,[role="button"],a') ||
+                    el.querySelector?.('button,[role="button"],a') ||
+                    el.parentElement ||
+                    el;
+                target.click();
+            }
+            """
+        ),
     ]
 
-    for locator in close_candidates:
+    for click_attempt in click_attempts:
+        try:
+            await click_attempt()
+            await profile_page.wait_for_timeout(900)
+            if await _wait_for_confirmed_info_dialog(profile_page):
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
+async def _open_confirmed_info_modal(profile_page: Page) -> bool:
+    candidates = [
+        profile_page.get_by_text("Confirmed info", exact=True),
+        profile_page.locator(
+            "xpath=//*[normalize-space(text())='Confirmed info']/ancestor::*[self::div or self::section or self::button or self::a][1]"
+        ),
+        profile_page.locator("button, a, [role='button']").filter(has_text="Confirmed info"),
+        profile_page.locator("div, section").filter(has_text="Confirmed info"),
+    ]
+
+    attempts = 0
+
+    for locator in candidates:
         try:
             count = await locator.count()
         except Exception:
             count = 0
 
         for i in range(min(count, 8)):
+            attempts += 1
             try:
-                txt = ""
-                try:
-                    txt = (await locator.nth(i).inner_text(timeout=500)).strip()
-                except Exception:
-                    pass
-
-                if txt in {"×", "✕", "X", ""}:
-                    await locator.nth(i).click(timeout=700)
-                    await profile_page.wait_for_timeout(300)
-                    return
-            except Exception:
+                candidate = locator.nth(i)
+                if await _click_confirmed_info_candidate(profile_page, candidate):
+                    print("Confirmed info modal opened.")
+                    return True
+            except Exception as e:
+                print(f"Confirmed info click attempt failed: {e}")
                 continue
+
+    print(f"Could not open Confirmed info modal. attempts={attempts}")
+    return False
+
+
+async def _close_modal_if_open(profile_page: Page) -> None:
+    dialog = profile_page.locator('[role="dialog"], [aria-modal="true"]').last
+
+    try:
+        if await dialog.count() > 0:
+            close_candidates = [
+                dialog.locator('[aria-label="Close"]'),
+                dialog.get_by_text("×", exact=True),
+                dialog.get_by_text("✕", exact=True),
+                dialog.get_by_text("X", exact=True),
+            ]
+
+            for locator in close_candidates:
+                try:
+                    if await locator.count() > 0:
+                        await locator.first.click(timeout=1000)
+                        await profile_page.wait_for_timeout(300)
+                        return
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     try:
         await profile_page.keyboard.press("Escape")
-        await profile_page.wait_for_timeout(200)
+        await profile_page.wait_for_timeout(250)
     except Exception:
         pass
 
@@ -717,17 +776,20 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
         return ""
 
     try:
-        await profile_page.wait_for_timeout(500)
+        await profile_page.wait_for_timeout(400)
 
         candidates = [
             profile_page.locator('[role="dialog"]').last,
+            profile_page.locator('[aria-modal="true"]').last,
             profile_page.locator("body"),
         ]
 
         for loc in candidates:
             try:
+                if await loc.count() == 0:
+                    continue
                 txt = await loc.inner_text(timeout=2500)
-                if txt and "Confirmed info" in txt and "Why is this important?" in txt:
+                if txt and "Confirmed info" in txt:
                     print("CONFIRMED INFO MODAL TEXT:")
                     print(txt[:1500])
                     return txt
@@ -743,15 +805,21 @@ def _extract_socials_from_confirmed_modal(modal_text: str) -> str:
     if not modal_text:
         return ""
 
+    flat = re.sub(r"\s+", " ", modal_text).strip()
+
     patterns = [
-        r"Public\s+@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal twitter account is verified via Twitter API",
-        r"@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal twitter account is verified via Twitter API",
+        r"Public\s+@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal Twitter account is verified via Twitter API",
+        r"@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal Twitter account is verified via Twitter API",
     ]
 
     for pattern in patterns:
-        m = re.search(pattern, modal_text, re.I | re.S)
+        m = re.search(pattern, flat, re.I)
         if m:
             return f"@{m.group(1)}"
+
+    m = re.search(r"(?<![\w.])@([A-Za-z0-9_]{2,15})\b", flat)
+    if m:
+        return f"@{m.group(1)}"
 
     return ""
 
@@ -760,15 +828,19 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
     if not modal_text:
         return ""
 
+    flat = re.sub(r"\s+", " ", modal_text).strip()
+
     patterns = [
-        r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
-        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
+        r"Public\s+([A-Za-z0-9 .,'\\-]+?)\s+Talent[’'`]?s location is verified via browser API",
+        r"([A-Za-z0-9 .,'\\-]+?)\s+Talent[’'`]?s location is verified via browser API",
     ]
 
     for pattern in patterns:
-        m = re.search(pattern, modal_text, re.I | re.S)
+        m = re.search(pattern, flat, re.I)
         if m:
-            return re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+            value = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+            if value and "Confirmed info" not in value and "Why is this important" not in value:
+                return value
 
     return ""
 
@@ -881,8 +953,9 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         linkedin, twitter, twitter_handle, youtube = _extract_social_links(full_text)
 
-        twitter_handle = _extract_socials_from_confirmed_modal(confirmed_modal_text)
-        twitter = ""
+        modal_twitter_handle = _extract_socials_from_confirmed_modal(confirmed_modal_text)
+        if modal_twitter_handle:
+            twitter_handle = modal_twitter_handle
 
         email = _extract_public_email(full_text)
         top_views = await _extract_top_views(profile_page)
@@ -891,7 +964,8 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         years = _extract_years_of_experience(full_text)
         open_for_work = _detect_open_to_work_text(full_text)
 
-        location = _extract_location_from_confirmed_modal(confirmed_modal_text)
+        modal_location = _extract_location_from_confirmed_modal(confirmed_modal_text)
+        location = modal_location or ""
 
         primary_role = (
             DISPLAY_ROLE_ALIASES.get(card["role"])
@@ -923,6 +997,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print("VIEWS PARSED:", rec.views)
         print("CREATORS PARSED:", rec.creators_worked_with)
         print("NICHE PARSED:", rec.niche)
+        print("MODAL RAW TEXT:", repr(confirmed_modal_text[:800]))
         print("LOCATION PARSED:", rec.location)
         print("TWITTER HANDLE PARSED:", rec.twitter_handle)
         print("ROLE PARSED:", rec.job_role)
