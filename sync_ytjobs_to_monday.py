@@ -452,20 +452,9 @@ def _extract_niche(text: str) -> str:
         return ""
 
     allowed = {
-        "Gaming",
-        "Finance",
-        "Beauty",
-        "Fitness",
-        "Tech",
-        "Business",
-        "Education",
-        "Podcast",
-        "Food",
-        "Lifestyle",
-        "Commentary",
-        "Entertainment",
-        "Economy",
-        "People & Blogs",
+        "Gaming", "Finance", "Beauty", "Fitness", "Tech", "Business",
+        "Education", "Podcast", "Food", "Lifestyle", "Commentary",
+        "Entertainment", "Economy", "People & Blogs",
     }
 
     found = []
@@ -664,26 +653,52 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
-    candidates = [
-        profile_page.get_by_text("Confirmed info", exact=True),
-        profile_page.get_by_text("Confirmed info", exact=False),
-    ]
+    try:
+        heading = profile_page.get_by_text("Confirmed info", exact=True).first
+        if await heading.count() > 0:
+            for xpath in [
+                "xpath=ancestor::div[1]",
+                "xpath=ancestor::div[2]",
+                "xpath=ancestor::div[3]",
+                "xpath=ancestor::section[1]",
+            ]:
+                try:
+                    target = heading.locator(xpath)
+                    await target.click(timeout=2000, force=True)
+                    await profile_page.wait_for_timeout(800)
+                    body_text = await profile_page.locator("body").inner_text()
+                    if "Why is this important?" in body_text and "Confirmed info" in body_text:
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
-    for locator in candidates:
-        try:
-            count = await locator.count()
-        except Exception:
-            count = 0
+    try:
+        opened = await profile_page.evaluate("""
+        () => {
+            const nodes = Array.from(document.querySelectorAll('div, section'));
+            const match = nodes.find(el => (el.innerText || '').trim() === 'Confirmed info');
+            if (!match) return false;
 
-        for i in range(min(count, 3)):
-            try:
-                await locator.nth(i).click(timeout=1500)
-                await profile_page.wait_for_timeout(700)
-                if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
-                    return True
-            except Exception:
-                continue
+            let target = match;
+            for (let i = 0; i < 3 && target.parentElement; i++) {
+                target = target.parentElement;
+            }
 
+            target.click();
+            return true;
+        }
+        """)
+        if opened:
+            await profile_page.wait_for_timeout(800)
+            body_text = await profile_page.locator("body").inner_text()
+            if "Why is this important?" in body_text and "Confirmed info" in body_text:
+                return True
+    except Exception:
+        pass
+
+    print("Could not open Confirmed info modal.")
     return False
 
 
@@ -725,19 +740,20 @@ async def _close_modal_if_open(profile_page: Page) -> None:
 async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
     opened = await _open_confirmed_info_modal(profile_page)
     if not opened:
-        print("Could not open Confirmed info modal.")
         return ""
 
     try:
-        modal_candidates = [
+        await profile_page.wait_for_timeout(500)
+
+        candidates = [
             profile_page.locator('[role="dialog"]').last,
             profile_page.locator("body"),
         ]
 
-        for loc in modal_candidates:
+        for loc in candidates:
             try:
-                txt = await loc.inner_text(timeout=2000)
-                if "Confirmed info" in txt and "Why is this important?" in txt:
+                txt = await loc.inner_text(timeout=2500)
+                if txt and "Confirmed info" in txt and "Why is this important?" in txt:
                     return txt
             except Exception:
                 continue
@@ -754,14 +770,16 @@ def _extract_socials_from_confirmed_modal(modal_text: str) -> tuple[str, str]:
     twitter_handle = ""
     youtube_url = ""
 
-    m = re.search(r"@([A-Za-z0-9_]{2,15})\b.*?Twitter API", modal_text, re.I | re.S)
-    if m:
-        twitter_handle = f"@{m.group(1)}"
+    patterns = [
+        r"Public\s+@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal twitter account is verified via Twitter API",
+        r"@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal twitter account is verified via Twitter API",
+    ]
 
-    if not twitter_handle:
-        m = re.search(r"Public\s+@([A-Za-z0-9_]{2,15})\b", modal_text, re.I)
+    for pattern in patterns:
+        m = re.search(pattern, modal_text, re.I | re.S)
         if m:
             twitter_handle = f"@{m.group(1)}"
+            break
 
     m = re.search(r"https?://(?:www\.)?youtube\.com/[^\s<>\])\"']+", modal_text, re.I)
     if m:
@@ -803,33 +821,6 @@ async def _extract_top_views(profile_page: Page) -> float | None:
             pass
 
     return None
-
-
-async def _extract_location_from_icon(profile_page: Page) -> str:
-    modal_text = await _extract_confirmed_info_modal_text(profile_page)
-    if not modal_text:
-        print("No confirmed info modal text found for location.")
-        return ""
-
-    patterns = [
-        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
-        r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, modal_text, re.I | re.S)
-        if m:
-            value = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
-            if 1 <= len(value) <= 80:
-                return value
-
-    print("No verified location found in modal.")
-    return ""
-
-
-async def _extract_modal_socials(profile_page: Page) -> tuple[str, str]:
-    modal_text = await _extract_confirmed_info_modal_text(profile_page)
-    return _extract_socials_from_confirmed_modal(modal_text)
 
 
 async def _extract_creators(profile_page: Page, combined_text: str) -> str:
@@ -887,6 +878,25 @@ async def _extract_creators(profile_page: Page, combined_text: str) -> str:
     return ", ".join(final_names[:20])
 
 
+def _extract_location_from_confirmed_modal(modal_text: str) -> str:
+    if not modal_text:
+        return ""
+
+    patterns = [
+        r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
+        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, modal_text, re.I | re.S)
+        if m:
+            value = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+            if 1 <= len(value) <= 80:
+                return value
+
+    return ""
+
+
 async def _scrape_profile(context, card: dict) -> TalentRecord | None:
     profile_url = _normalize_profile_link(card["href"])
     if not profile_url:
@@ -905,10 +915,13 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         linkedin, twitter, twitter_handle, youtube = _extract_social_links(full_text)
 
-        modal_twitter_handle, modal_youtube = await _extract_modal_socials(profile_page)
+        modal_twitter_handle, modal_youtube = _extract_socials_from_confirmed_modal(confirmed_modal_text)
         if modal_twitter_handle:
             twitter_handle = modal_twitter_handle
             twitter = f"https://x.com/{modal_twitter_handle.lstrip('@')}"
+        else:
+            twitter_handle = ""
+
         if modal_youtube and not youtube:
             youtube = modal_youtube
 
@@ -919,9 +932,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         years = _extract_years_of_experience(full_text)
         open_for_work = _detect_open_to_work_text(full_text)
 
-        location = await _extract_location_from_icon(profile_page)
-        if not location:
-            location = ""
+        location = _extract_location_from_confirmed_modal(confirmed_modal_text)
 
         primary_role = (
             DISPLAY_ROLE_ALIASES.get(card["role"])
