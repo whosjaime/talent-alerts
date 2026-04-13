@@ -375,19 +375,12 @@ def _extract_twitter_handle(text: str) -> str:
         text
     )
 
-    patterns = [
-        r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})\b",
-        r"(?<![A-Za-z0-9._%+-])@([A-Za-z0-9_]{2,15})\b",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, text_without_emails, re.I)
-        if m:
-            handle = m.group(1).strip()
-            if handle:
-                return f"@{handle}"
+    m = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})\b", text_without_emails, re.I)
+    if m:
+        return f"@{m.group(1)}"
 
     return ""
+
 
 def _extract_social_links(text: str) -> tuple[str, str, str, str]:
     linkedin = ""
@@ -396,8 +389,8 @@ def _extract_social_links(text: str) -> tuple[str, str, str, str]:
     youtube = ""
 
     linkedin_patterns = [
-        r"https?://(?:www\.)?linkedin\.com/[^\s<>\])]+",
-        r"(?:linkedin\.com/[^\s<>\])]+)",
+        r"https?://(?:www\.)?linkedin\.com/[^\s<>\])\"']+",
+        r"(?:linkedin\.com/[^\s<>\])\"']+)",
     ]
     for pattern in linkedin_patterns:
         m = re.search(pattern, text, re.I)
@@ -419,12 +412,17 @@ def _extract_social_links(text: str) -> tuple[str, str, str, str]:
                 twitter = "https://" + twitter
             break
 
-    twitter_handle = _extract_twitter_handle(text)
+    if twitter:
+        m = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})\b", twitter, re.I)
+        if m:
+            twitter_handle = f"@{m.group(1)}"
+    else:
+        twitter_handle = _extract_twitter_handle(text)
 
     youtube_patterns = [
-        r"https?://(?:www\.)?youtube\.com/[^\s<>\])]+",
-        r"https?://youtu\.be/[^\s<>\])]+",
-        r"(?:youtube\.com/[^\s<>\])]+)",
+        r"https?://(?:www\.)?youtube\.com/[^\s<>\])\"']+",
+        r"https?://youtu\.be/[^\s<>\])\"']+",
+        r"(?:youtube\.com/[^\s<>\])\"']+)",
     ]
     for pattern in youtube_patterns:
         m = re.search(pattern, text, re.I)
@@ -520,29 +518,11 @@ def _looks_like_creator_name(value: str) -> bool:
     lowered = v.lower()
 
     bad_phrases = [
-        "verified",
-        "subscribers",
-        "videos",
-        "likes",
-        "views",
-        "great communication",
-        "pleasure to work together",
-        "dedicated specialist",
-        "professional",
-        "excellent",
-        "always a pleasure",
-        "confirmed info",
-        "client reviews",
-        "portfolio",
-        "about",
-        "roles",
-        "experience",
-        "public",
-        "private",
-        "profile",
-        "timeline",
-        "posts",
-        "see more",
+        "verified", "subscribers", "videos", "likes", "views",
+        "great communication", "pleasure to work together", "dedicated specialist",
+        "professional", "excellent", "always a pleasure", "confirmed info",
+        "client reviews", "portfolio", "about", "roles", "experience",
+        "public", "private", "profile", "timeline", "posts", "see more",
     ]
 
     if lowered in GENERIC_CREATOR_WORDS:
@@ -698,10 +678,8 @@ async def _open_confirmed_info_modal(profile_page: Page) -> bool:
         for i in range(min(count, 3)):
             try:
                 await locator.nth(i).click(timeout=1500)
-                await profile_page.wait_for_timeout(600)
+                await profile_page.wait_for_timeout(700)
                 if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
-                    return True
-                if await profile_page.get_by_text("Talent’s location is verified via browser API.", exact=False).count() > 0:
                     return True
             except Exception:
                 continue
@@ -722,7 +700,7 @@ async def _close_modal_if_open(profile_page: Page) -> None:
         except Exception:
             count = 0
 
-        for i in range(min(count, 5)):
+        for i in range(min(count, 8)):
             try:
                 txt = ""
                 try:
@@ -730,7 +708,7 @@ async def _close_modal_if_open(profile_page: Page) -> None:
                 except Exception:
                     pass
 
-                if txt == "×" or txt == "✕" or txt == "X" or txt == "":
+                if txt in {"×", "✕", "X", ""}:
                     await locator.nth(i).click(timeout=700)
                     await profile_page.wait_for_timeout(300)
                     return
@@ -745,27 +723,51 @@ async def _close_modal_if_open(profile_page: Page) -> None:
 
 
 async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
-    if not await _open_confirmed_info_modal(profile_page):
+    opened = await _open_confirmed_info_modal(profile_page)
+    if not opened:
+        print("Could not open Confirmed info modal.")
         return ""
 
-    modal_text = ""
     try:
-        possible_modal_roots = [
+        modal_candidates = [
             profile_page.locator('[role="dialog"]').last,
             profile_page.locator("body"),
         ]
-        for root in possible_modal_roots:
+
+        for loc in modal_candidates:
             try:
-                txt = await root.inner_text(timeout=1500)
-                if "Why is this important?" in txt or "Talent’s location is verified via browser API." in txt:
-                    modal_text = txt
-                    break
+                txt = await loc.inner_text(timeout=2000)
+                if "Confirmed info" in txt and "Why is this important?" in txt:
+                    return txt
             except Exception:
                 continue
+
+        return ""
     finally:
         await _close_modal_if_open(profile_page)
 
-    return modal_text
+
+def _extract_socials_from_confirmed_modal(modal_text: str) -> tuple[str, str]:
+    if not modal_text:
+        return "", ""
+
+    twitter_handle = ""
+    youtube_url = ""
+
+    m = re.search(r"@([A-Za-z0-9_]{2,15})\b.*?Twitter API", modal_text, re.I | re.S)
+    if m:
+        twitter_handle = f"@{m.group(1)}"
+
+    if not twitter_handle:
+        m = re.search(r"Public\s+@([A-Za-z0-9_]{2,15})\b", modal_text, re.I)
+        if m:
+            twitter_handle = f"@{m.group(1)}"
+
+    m = re.search(r"https?://(?:www\.)?youtube\.com/[^\s<>\])\"']+", modal_text, re.I)
+    if m:
+        youtube_url = _clean_social(m.group(0))
+
+    return twitter_handle, youtube_url
 
 
 async def _extract_top_views(profile_page: Page) -> float | None:
@@ -804,80 +806,30 @@ async def _extract_top_views(profile_page: Page) -> float | None:
 
 
 async def _extract_location_from_icon(profile_page: Page) -> str:
-    icon_candidates = [
-        profile_page.locator("svg"),
-        profile_page.locator("[role='button'] svg"),
-        profile_page.locator("button svg"),
+    modal_text = await _extract_confirmed_info_modal_text(profile_page)
+    if not modal_text:
+        print("No confirmed info modal text found for location.")
+        return ""
+
+    patterns = [
+        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
+        r"Public\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
     ]
 
-    for svg_locator in icon_candidates:
-        try:
-            count = await svg_locator.count()
-        except Exception:
-            count = 0
+    for pattern in patterns:
+        m = re.search(pattern, modal_text, re.I | re.S)
+        if m:
+            value = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+            if 1 <= len(value) <= 80:
+                return value
 
-        for i in range(min(count, 80)):
-            try:
-                svg = svg_locator.nth(i)
-                outer_html = await svg.evaluate("(el) => el.outerHTML")
-            except Exception:
-                continue
-
-            looks_like_location = (
-                'viewBox="0 0 512 512"' in outer_html
-                and 'circle cx="256" cy="192" r="48"' in outer_html
-            )
-
-            if not looks_like_location:
-                continue
-
-            try:
-                clickable = svg.locator("xpath=ancestor::*[self::button or @role='button' or self::div][1]")
-                await clickable.click(timeout=1500)
-            except Exception:
-                try:
-                    await svg.click(timeout=1500)
-                except Exception:
-                    continue
-
-            await profile_page.wait_for_timeout(700)
-
-            try:
-                body_text = await profile_page.locator("body").inner_text()
-            except Exception:
-                body_text = ""
-
-            match = re.search(
-                r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
-                body_text,
-                re.I,
-            )
-            if match:
-                await _close_modal_if_open(profile_page)
-                return match.group(1).strip()
-
-            await _close_modal_if_open(profile_page)
-
-    print("No matching location icon found.")
+    print("No verified location found in modal.")
     return ""
 
 
 async def _extract_modal_socials(profile_page: Page) -> tuple[str, str]:
     modal_text = await _extract_confirmed_info_modal_text(profile_page)
-    twitter_handle = _extract_twitter_handle(modal_text)
-    youtube = ""
-
-    youtube_patterns = [
-        r"https?://(?:www\.)?youtube\.com/[^\s<>\])]+",
-        r"https?://youtu\.be/[^\s<>\])]+",
-    ]
-    for pattern in youtube_patterns:
-        m = re.search(pattern, modal_text, re.I)
-        if m:
-            youtube = _clean_social(m.group(0))
-            break
-
-    return twitter_handle, youtube
+    return _extract_socials_from_confirmed_modal(modal_text)
 
 
 async def _extract_creators(profile_page: Page, combined_text: str) -> str:
@@ -956,6 +908,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         modal_twitter_handle, modal_youtube = await _extract_modal_socials(profile_page)
         if modal_twitter_handle:
             twitter_handle = modal_twitter_handle
+            twitter = f"https://x.com/{modal_twitter_handle.lstrip('@')}"
         if modal_youtube and not youtube:
             youtube = modal_youtube
 
