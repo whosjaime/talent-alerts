@@ -178,6 +178,7 @@ GENERIC_CREATOR_WORDS = {
     "about", "portfolio", "experience", "verified clients", "client reviews", "roles",
     "categories", "confirmed info", "hire me", "open to work", "views", "subscribers",
     "youtube", "linkedin", "twitter", "x", "instagram", "tiktok", "public", "private",
+    "videos", "likes", "profile", "clients", "timeline", "posts",
 }
 
 
@@ -313,12 +314,16 @@ def _extract_views_number(text: str) -> float | None:
     if not text:
         return None
 
+    text = re.sub(r"\s+", " ", text).strip()
+
     patterns = [
-        r"(\d+(?:,\d{3})+)\+?\s*views\b",
-        r"(\d+(?:\.\d+)?)\+?\s*([bmk])\s*views\b",
-        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s*views\b",
-        r"views\b[^\d]{0,20}(\d+(?:,\d{3})+)",
-        r"views\b[^\d]{0,20}(\d+(?:\.\d+)?)\s*([bmk])\b",
+        r"(\d+(?:,\d{3})+)\+?\s*(?:total\s+)?views\b",
+        r"(\d+(?:\.\d+)?)\+?\s*([bmk])\s*(?:total\s+)?views\b",
+        r"(\d+(?:\.\d+)?)\+?\s*(billion|million|thousand)\s*(?:total\s+)?views\b",
+        r"(?:total\s+views|views)\s*[:\-]?\s*(\d+(?:,\d{3})+)",
+        r"(?:total\s+views|views)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([bmk])\b",
+        r"(?:channel\s+views|lifetime\s+views)\s*[:\-]?\s*(\d+(?:,\d{3})+)",
+        r"(?:channel\s+views|lifetime\s+views)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*([bmk])\b",
     ]
 
     for pattern in patterns:
@@ -326,13 +331,10 @@ def _extract_views_number(text: str) -> float | None:
         if not m:
             continue
 
-        groups = m.groups()
-        if len(groups) == 1 or (len(groups) > 1 and groups[1] is None):
+        if len(m.groups()) == 1 or (len(m.groups()) > 1 and m.group(2) is None):
             return float(m.group(1).replace(",", ""))
 
-        num_text = m.group(1)
-        suffix = m.group(2)
-        return _parse_compact_number(num_text, suffix)
+        return _parse_compact_number(m.group(1), m.group(2))
 
     return None
 
@@ -541,6 +543,9 @@ def _looks_like_creator_name(value: str) -> bool:
         "experience",
         "public",
         "private",
+        "profile",
+        "timeline",
+        "posts",
     ]
 
     if lowered in GENERIC_CREATOR_WORDS:
@@ -557,6 +562,26 @@ def _looks_like_creator_name(value: str) -> bool:
         return False
 
     return True
+
+
+def _extract_location_from_text(text: str) -> str:
+    if not text:
+        return ""
+
+    patterns = [
+        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
+        r"location(?: is)?(?: verified)?\s*[:\-]?\s*([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+        r"based in\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+        r"located in\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+        r"\b([A-Z][A-Za-z .'\-]+,\s*[A-Z]{2})\b",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    return ""
 
 
 async def _accept_cookies(page: Page) -> None:
@@ -704,28 +729,6 @@ async def _open_confirmed_info_modal(profile_page: Page) -> bool:
             except Exception:
                 continue
 
-    icon_locators = [
-        profile_page.locator("svg"),
-        profile_page.locator('[class*="confirmed"]'),
-    ]
-
-    for locator in icon_locators:
-        try:
-            count = await locator.count()
-        except Exception:
-            count = 0
-
-        for i in range(min(count, 20)):
-            try:
-                await locator.nth(i).click(timeout=700)
-                await profile_page.wait_for_timeout(400)
-                if await profile_page.get_by_text("Why is this important?", exact=False).count() > 0:
-                    return True
-                if await profile_page.get_by_text("Talent’s location is verified via browser API.", exact=False).count() > 0:
-                    return True
-            except Exception:
-                continue
-
     return False
 
 
@@ -788,74 +791,106 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
     return modal_text
 
 
-async def _extract_creators(profile_page: Page, combined_text: str) -> str:
-    names = []
+async def _extract_top_views(profile_page: Page) -> float | None:
+    try:
+        body_text = await profile_page.locator("body").inner_text()
+    except Exception:
+        body_text = ""
 
-    selectors = [
-        ".swiper-wrapper .swiper-slide",
-        '[class*="swiper-slide"]',
-        'div:has(> img)',
+    stat_patterns = [
+        r"(\d+(?:\.\d+)?)\s*([BKM])\s*Views",
+        r"(\d+(?:,\d{3})+)\s*Views",
     ]
 
-    for selector in selectors:
+    for pattern in stat_patterns:
+        m = re.search(pattern, body_text, re.I)
+        if m:
+            return _extract_views_number(m.group(0))
+
+    candidates = [
+        profile_page.get_by_text("Views", exact=False),
+        profile_page.locator("text=/[0-9.,]+\\s*[BMK]?\\s*Views/i"),
+    ]
+
+    for locator in candidates:
         try:
-            nodes = profile_page.locator(selector)
-            count = await nodes.count()
-            for i in range(min(count, 100)):
-                text = (await nodes.nth(i).inner_text(timeout=1000)).strip()
-                if not text:
-                    continue
-                for line in text.splitlines():
-                    line = line.strip()
-                    if _looks_like_creator_name(line):
-                        names.append(line)
-                        break
+            count = await locator.count()
+            for i in range(min(count, 10)):
+                text = (await locator.nth(i).inner_text(timeout=1000)).strip()
+                val = _extract_views_number(text)
+                if val is not None:
+                    return val
         except Exception:
             pass
 
-    m = re.search(
-        r"Verified Clients\s*(.*?)(?:\nClient Reviews|\nRoles|\nCategories|\nExperience|\nAbout|\nPortfolio|$)",
-        combined_text,
-        re.I | re.S,
-    )
-    if m:
-        lines = [ln.strip() for ln in m.group(1).splitlines() if ln.strip()]
-        for line in lines:
-            if _looks_like_creator_name(line):
-                names.append(line)
-
-    m2 = re.search(
-        r"Clients\s*(.*?)(?:\nTimeline|\nPosts|\nClient Reviews|\nRoles|\nCategories|\nExperience|\nAbout|\nPortfolio|$)",
-        combined_text,
-        re.I | re.S,
-    )
-    if m2:
-        lines = [ln.strip() for ln in m2.group(1).splitlines() if ln.strip()]
-        for line in lines:
-            if _looks_like_creator_name(line):
-                names.append(line)
-
-    return ", ".join(_dedupe_keep_order(names)[:20])
+    return None
 
 
-async def _extract_location(profile_page: Page, combined_text: str) -> str:
-    patterns = [
-        r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[`’']s location is verified via browser API",
-        r"Location\s*[:\-]?\s*([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
-        r"Based in\s+([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)",
+async def _extract_location_from_icon(profile_page: Page) -> str:
+    icon_candidates = [
+        profile_page.locator("svg"),
+        profile_page.locator("[role='button'] svg"),
+        profile_page.locator("button svg"),
     ]
 
-    modal_text = await _extract_confirmed_info_modal_text(profile_page)
-    for pattern in patterns:
-        m = re.search(pattern, modal_text, re.I)
-        if m:
-            return m.group(1).strip()
+    checked = 0
 
-    for pattern in patterns:
-        m = re.search(pattern, combined_text, re.I)
-        if m:
-            return m.group(1).strip()
+    for svg_locator in icon_candidates:
+        try:
+            count = await svg_locator.count()
+        except Exception:
+            count = 0
 
+        for i in range(min(count, 60)):
+            try:
+                svg = svg_locator.nth(i)
+                outer_html = await svg.evaluate("(el) => el.outerHTML")
+            except Exception:
+                continue
+
+            looks_like_location = (
+                'viewBox="0 0 512 512"' in outer_html
+                and 'circle cx="256" cy="192" r="48"' in outer_html
+            )
+
+            if not looks_like_location:
+                continue
+
+            checked += 1
+            try:
+                clickable = svg.locator("xpath=ancestor::*[self::button or @role='button' or self::div][1]")
+                await clickable.click(timeout=1500)
+            except Exception:
+                try:
+                    await svg.click(timeout=1500)
+                except Exception:
+                    continue
+
+            await profile_page.wait_for_timeout(700)
+
+            try:
+                body_text = await profile_page.locator("body").inner_text()
+            except Exception:
+                body_text = ""
+
+            match = re.search(
+                r"([A-Z][A-Za-z .'\-]+,\s*[A-Z][A-Za-z .'\-]+(?:,\s*[A-Z][A-Za-z .'\-]+)?)\s+Talent[’'`]?s location is verified via browser API",
+                body_text,
+                re.I,
+            )
+            if match:
+                await _close_modal_if_open(profile_page)
+                return match.group(1).strip()
+
+            fallback = _extract_location_from_text(body_text)
+            if fallback:
+                await _close_modal_if_open(profile_page)
+                return fallback
+
+            await _close_modal_if_open(profile_page)
+
+    if checked == 0:
+        print("No matching location icon found.")
     return ""
 
 
@@ -877,6 +912,61 @@ async def _extract_modal_socials(profile_page: Page) -> tuple[str, str]:
     return twitter_handle, youtube
 
 
+async def _extract_creators(profile_page: Page, combined_text: str) -> str:
+    names = []
+
+    section_patterns = [
+        r"Verified Clients\s*(.*?)(?:\nTimeline|\nPosts|\nClient Reviews|\nRoles|\nCategories|\nExperience|\nAbout|\nPortfolio|$)",
+        r"Clients\s*(.*?)(?:\nTimeline|\nPosts|\nClient Reviews|\nRoles|\nCategories|\nExperience|\nAbout|\nPortfolio|$)",
+        r"Worked With\s*(.*?)(?:\nClient Reviews|\nRoles|\nCategories|\nExperience|\nAbout|\nPortfolio|$)",
+    ]
+
+    for pattern in section_patterns:
+        m = re.search(pattern, combined_text, re.I | re.S)
+        if m:
+            lines = [ln.strip() for ln in m.group(1).splitlines() if ln.strip()]
+            for line in lines:
+                line = re.sub(r"\s+", " ", line).strip()
+                if _looks_like_creator_name(line):
+                    names.append(line)
+
+    candidate_locators = [
+        profile_page.locator(".swiper-wrapper .swiper-slide"),
+        profile_page.locator('[class*="swiper-slide"]'),
+        profile_page.locator("img[alt]").locator("xpath=.."),
+    ]
+
+    for locator in candidate_locators:
+        try:
+            count = await locator.count()
+            for i in range(min(count, 80)):
+                text = (await locator.nth(i).inner_text(timeout=1000)).strip()
+                if not text:
+                    continue
+
+                for line in text.splitlines():
+                    cleaned = re.sub(r"\s+", " ", line).strip()
+                    if _looks_like_creator_name(cleaned):
+                        names.append(cleaned)
+        except Exception:
+            pass
+
+    blocked = {
+        "Verified Clients", "Portfolio", "Profile", "Clients", "Timeline", "Posts",
+        "Videos", "Views", "Likes", "Channel Manager", "Video Editor", "Recommended",
+    }
+
+    final_names = []
+    for n in _dedupe_keep_order(names):
+        if n in blocked:
+            continue
+        if re.search(r"\bsubscribers\b", n, re.I):
+            continue
+        final_names.append(n)
+
+    return ", ".join(final_names[:20])
+
+
 async def _scrape_profile(context, card: dict) -> TalentRecord | None:
     profile_url = _normalize_profile_link(card["href"])
     if not profile_url:
@@ -890,28 +980,35 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         await profile_page.wait_for_timeout(1200)
 
         combined_text, html = await _collect_profile_text(profile_page)
+        confirmed_modal_text = await _extract_confirmed_info_modal_text(profile_page)
+        full_text = "\n".join([combined_text, html, confirmed_modal_text]).strip()
 
-        linkedin, twitter, twitter_handle, youtube = _extract_social_links(combined_text + "\n" + html)
+        linkedin, twitter, twitter_handle, youtube = _extract_social_links(full_text)
+
         modal_twitter_handle, modal_youtube = await _extract_modal_socials(profile_page)
         if modal_twitter_handle:
             twitter_handle = modal_twitter_handle
         if modal_youtube and not youtube:
             youtube = modal_youtube
 
-        email = _extract_public_email(combined_text)
-        views = _extract_views_number(combined_text + "\n" + html)
-        niche = _extract_niche(combined_text)
-        years = _extract_years_of_experience(combined_text)
-        open_for_work = _detect_open_to_work_text(combined_text)
-        location = await _extract_location(profile_page, combined_text)
+        email = _extract_public_email(full_text)
+        top_views = await _extract_top_views(profile_page)
+        views = top_views if top_views is not None else _extract_views_number(full_text)
+        niche = _extract_niche(full_text)
+        years = _extract_years_of_experience(full_text)
+        open_for_work = _detect_open_to_work_text(full_text)
+
+        location = await _extract_location_from_icon(profile_page)
+        if not location:
+            location = _extract_location_from_text(full_text)
 
         primary_role = (
             DISPLAY_ROLE_ALIASES.get(card["role"])
-            or _detect_role_from_text(combined_text)
+            or _detect_role_from_text(full_text)
             or _normalize_role(card["role"])
         )
 
-        creators = await _extract_creators(profile_page, combined_text)
+        creators = await _extract_creators(profile_page, full_text)
 
         rec = TalentRecord(
             name=card["name"],
@@ -928,7 +1025,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
             twitter=twitter,
             twitter_handle=twitter_handle,
             youtube=youtube,
-            _profile_text=combined_text,
+            _profile_text=full_text,
         )
 
         print("EMAIL PARSED:", rec.email)
