@@ -506,6 +506,27 @@ def _looks_like_creator_name(value: str) -> bool:
     return True
 
 
+def _extract_location_from_page_text(text: str) -> str:
+    if not text:
+        return ""
+
+    patterns = [
+        r"Location\s*[:\-]\s*([A-Za-z0-9 ,.'/-]+)",
+        r"based in\s+([A-Za-z0-9 ,.'/-]+)",
+        r"from\s+([A-Za-z0-9 ,.'/-]+)",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if not m:
+            continue
+        location = m.group(1).strip(" ,.-")
+        if 3 <= len(location) <= 80:
+            return location
+
+    return ""
+
+
 async def _accept_cookies(page: Page) -> None:
     possible_texts = ["Accept", "I Accept", "Accept All", "Allow all"]
     for txt in possible_texts:
@@ -631,22 +652,38 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 async def _extract_open_popup_text(profile_page: Page) -> str:
     popup_locators = [
+        profile_page.locator('[data-testid="gray-popup-section"]:visible').last,
         profile_page.locator('[role="dialog"]:visible').last,
         profile_page.locator('[aria-modal="true"]:visible').last,
         profile_page.locator('[role="tooltip"]:visible').last,
         profile_page.locator('[data-state="open"]:visible').last,
         profile_page.locator('.popover:visible').last,
         profile_page.locator('.modal:visible').last,
-        profile_page.locator('[data-testid="gray-popup-section"]:visible').last,
     ]
 
     for loc in popup_locators:
         try:
             if await loc.count() == 0:
                 continue
-            txt = await loc.inner_text(timeout=1500)
-            if txt and txt.strip():
+
+            txt = (await loc.inner_text(timeout=1000)).strip()
+            if txt:
                 return txt
+
+            descendants = loc.locator("*")
+            count = await descendants.count()
+            for i in range(min(count, 25)):
+                try:
+                    sub = descendants.nth(i)
+                    subtxt = (await sub.inner_text(timeout=300)).strip()
+                    if subtxt and len(subtxt) > 2:
+                        return subtxt
+                except Exception:
+                    continue
+
+            html = await loc.inner_html(timeout=1000)
+            print("GRAY POPUP HTML:", html[:2000], flush=True)
+
         except Exception:
             continue
 
@@ -673,21 +710,6 @@ async def _debug_confirmed_info_area(profile_page: Page) -> None:
         print("OPENISH COUNT:", openish_count, flush=True)
     except Exception:
         pass
-
-
-async def _click_locator_best_effort(locator) -> bool:
-    try:
-        if await locator.count() == 0:
-            return False
-        await locator.scroll_into_view_if_needed()
-        await locator.click(force=True, timeout=1500)
-        return True
-    except Exception:
-        try:
-            await locator.evaluate("(el) => el.click()")
-            return True
-        except Exception:
-            return False
 
 
 async def _get_confirmed_info_icon_blocks(profile_page: Page):
@@ -757,10 +779,12 @@ async def _open_confirmed_info_modal(profile_page: Page, preferred_indices: list
         try:
             await target.evaluate("""
                 (el) => {
-                    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-                    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-                    el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
-                    el.click();
+                    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                 }
             """)
             await profile_page.wait_for_timeout(350)
@@ -776,10 +800,12 @@ async def _open_confirmed_info_modal(profile_page: Page, preferred_indices: list
             inner_icon = target.locator("svg").nth(1)
             await inner_icon.evaluate("""
                 (el) => {
-                    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-                    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-                    el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
-                    el.click();
+                    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                 }
             """)
             await profile_page.wait_for_timeout(350)
@@ -1012,6 +1038,8 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         open_for_work = _detect_open_to_work_text(full_text)
 
         location = _extract_location_from_confirmed_modal(confirmed_modal_text)
+        if not location:
+            location = _extract_location_from_page_text(full_text)
 
         primary_role = (
             DISPLAY_ROLE_ALIASES.get(card["role"])
