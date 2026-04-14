@@ -510,19 +510,45 @@ def _extract_location_from_page_text(text: str) -> str:
     if not text:
         return ""
 
+    clean = re.sub(r"\s+", " ", text).strip()
+
     patterns = [
-        r"Location\s*[:\-]\s*([A-Za-z0-9 ,.'/-]+)",
-        r"based in\s+([A-Za-z0-9 ,.'/-]+)",
-        r"from\s+([A-Za-z0-9 ,.'/-]+)",
+        r"\bLocation\s*:\s*([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
+        r"\bbased in\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
+        r"\bfrom\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
+    ]
+
+    blocked_exact = {
+        "Our Childhood",
+        "Dying",
+    }
+
+    blocked_contains = [
+        "working with",
+        "attention to detail",
+        "turn overs",
+        "scratch",
+        "let",
+        "package",
+        "world’s biggest",
+        "world's biggest",
     ]
 
     for pattern in patterns:
-        m = re.search(pattern, text, re.I)
+        m = re.search(pattern, clean)
         if not m:
             continue
+
         location = m.group(1).strip(" ,.-")
-        if 3 <= len(location) <= 80:
-            return location
+
+        if len(location) < 3 or len(location) > 40:
+            continue
+        if location in blocked_exact:
+            continue
+        if any(x.lower() in location.lower() for x in blocked_contains):
+            continue
+
+        return location
 
     return ""
 
