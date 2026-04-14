@@ -181,6 +181,10 @@ GENERIC_CREATOR_WORDS = {
     "videos", "likes", "profile", "clients", "timeline", "posts", "see more",
 }
 
+INVALID_TWITTER_HANDLES = {
+    "intent", "share", "home", "search", "explore", "compose", "i"
+}
+
 
 @dataclass
 class TalentRecord:
@@ -368,15 +372,26 @@ def _clean_social(url: str) -> str:
 def _extract_twitter_handle(text: str) -> str:
     if not text:
         return ""
+
     text_without_emails = re.sub(
         r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
         " ",
         text,
     )
-    m = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})\b", text_without_emails, re.I)
-    if m:
-        return f"@{m.group(1)}"
-    return ""
+
+    m = re.search(
+        r"(?:twitter\.com|x\.com)/(?!intent\b)([A-Za-z0-9_]{2,15})\b",
+        text_without_emails,
+        re.I,
+    )
+    if not m:
+        return ""
+
+    handle = m.group(1).strip()
+    if handle.lower() in INVALID_TWITTER_HANDLES:
+        return ""
+
+    return f"@{handle}"
 
 
 def _extract_social_links(text: str) -> tuple[str, str, str, str]:
@@ -398,23 +413,17 @@ def _extract_social_links(text: str) -> tuple[str, str, str, str]:
             break
 
     twitter_patterns = [
-        r"https?://(?:www\.)?(?:twitter\.com|x\.com)/[A-Za-z0-9_]+",
-        r"(?:twitter\.com|x\.com)/[A-Za-z0-9_]+",
+        r"https?://(?:www\.)?(?:twitter\.com|x\.com)/(?!intent\b)([A-Za-z0-9_]{2,15})\b",
+        r"(?:twitter\.com|x\.com)/(?!intent\b)([A-Za-z0-9_]{2,15})\b",
     ]
     for pattern in twitter_patterns:
         m = re.search(pattern, text, re.I)
         if m:
-            twitter = _clean_social(m.group(0))
-            if not twitter.startswith("http"):
-                twitter = "https://" + twitter
-            break
-
-    if twitter:
-        m = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{2,15})\b", twitter, re.I)
-        if m:
-            twitter_handle = f"@{m.group(1)}"
-    else:
-        twitter_handle = _extract_twitter_handle(text)
+            handle = m.group(1).strip()
+            if handle.lower() not in INVALID_TWITTER_HANDLES:
+                twitter_handle = f"@{handle}"
+                twitter = f"https://x.com/{handle}"
+                break
 
     youtube_patterns = [
         r"https?://(?:www\.)?youtube\.com/[^\s<>\])\"']+",
@@ -538,7 +547,7 @@ async def _accept_cookies(page: Page) -> None:
 async def _wait_for_profile_ready(profile_page: Page) -> None:
     await profile_page.wait_for_load_state("domcontentloaded")
     try:
-        await profile_page.wait_for_load_state("networkidle", timeout=6000)
+        await profile_page.wait_for_load_state("networkidle", timeout=10000)
     except Exception:
         pass
 
@@ -551,12 +560,12 @@ async def _wait_for_profile_ready(profile_page: Page) -> None:
 
     for locator in anchors:
         try:
-            await locator.wait_for(timeout=3000)
+            await locator.wait_for(timeout=5000)
             return
         except Exception:
             continue
 
-    await profile_page.wait_for_timeout(600)
+    await profile_page.wait_for_timeout(1500)
 
 
 async def _get_visible_cards(page: Page) -> list[dict]:
@@ -643,98 +652,98 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
     return combined_text, html
 
 
-async def _wait_for_confirmed_info_dialog(profile_page: Page) -> bool:
-    try:
-        dialog = profile_page.locator('[role="dialog"]').last
-        if await dialog.count() == 0:
-            return False
-        await dialog.wait_for(state="visible", timeout=800)
-        txt = await dialog.inner_text(timeout=800)
-        return bool(txt and "Confirmed info" in txt)
-    except Exception:
-        return False
-
-
-async def _click_confirmed_info_candidate(profile_page: Page, candidate) -> bool:
-    try:
-        await candidate.scroll_into_view_if_needed()
-    except Exception:
-        pass
-
-    try:
-        await candidate.click(timeout=800)
-    except Exception:
-        try:
-            await candidate.evaluate(
-                """
-                (el) => {
-                    const target =
-                        el.closest('button,[role="button"],a') ||
-                        el.querySelector?.('button,[role="button"],a') ||
-                        el;
-                    target.click();
-                }
-                """
-            )
-        except Exception:
-            return False
-
-    await profile_page.wait_for_timeout(250)
-    return await _wait_for_confirmed_info_dialog(profile_page)
-
-
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
-    candidates = [
-        profile_page.get_by_text("Confirmed info", exact=True),
-        profile_page.locator("[role='button'], button, a").filter(has_text="Confirmed info"),
-        profile_page.locator("div, section").filter(has_text="Confirmed info"),
-    ]
+    try:
+        opened = await profile_page.evaluate(
+            """
+            () => {
+                const textNodes = Array.from(document.querySelectorAll('*'));
+                const label = textNodes.find(el => (el.textContent || '').trim() === 'Confirmed info');
+                if (!label) return false;
 
-    for locator in candidates:
-        try:
-            count = await locator.count()
-        except Exception:
-            count = 0
+                let node = label;
+                for (let i = 0; i < 8 && node; i++) {
+                    const rect = node.getBoundingClientRect();
+                    const text = (node.textContent || '').trim().toLowerCase();
+                    const hasSvg = !!node.querySelector('svg');
+                    const hasImg = !!node.querySelector('img');
+                    const style = window.getComputedStyle(node);
+                    const clickable =
+                        node.tagName === 'BUTTON' ||
+                        node.tagName === 'A' ||
+                        node.getAttribute('role') === 'button' ||
+                        style.cursor === 'pointer' ||
+                        typeof node.onclick === 'function';
 
-        for i in range(min(count, 2)):
-            try:
-                candidate = locator.nth(i)
-                if await _click_confirmed_info_candidate(profile_page, candidate):
-                    print("Confirmed info modal opened.", flush=True)
-                    return True
-            except Exception:
-                continue
+                    const looksLikeCard =
+                        rect.width >= 140 &&
+                        rect.height >= 50 &&
+                        text.includes('confirmed info') &&
+                        (hasSvg || hasImg);
+
+                    if (looksLikeCard || clickable) {
+                        node.click();
+                        return true;
+                    }
+
+                    node = node.parentElement;
+                }
+
+                return false;
+            }
+            """
+        )
+
+        if not opened:
+            print("Could not click Confirmed info box.", flush=True)
+            return False
+
+        await profile_page.wait_for_timeout(700)
+
+        dialog = profile_page.locator('[role="dialog"]').last
+        if await dialog.count() > 0:
+            txt = await dialog.inner_text(timeout=1200)
+            if txt and "Confirmed info" in txt:
+                print("Confirmed info modal opened.", flush=True)
+                return True
+
+        body_text = await profile_page.locator("body").inner_text(timeout=1200)
+        if "Confirmed info" in body_text and "Why is this important?" in body_text:
+            print("Confirmed info modal opened.", flush=True)
+            return True
+
+    except Exception as e:
+        print(f"Confirmed info modal click failed: {e}", flush=True)
 
     print("Could not open Confirmed info modal.", flush=True)
     return False
 
 
 async def _close_modal_if_open(profile_page: Page) -> None:
-    try:
-        dialog = profile_page.locator('[role="dialog"]').last
-        if await dialog.count() > 0:
-            close_candidates = [
-                dialog.locator('[aria-label="Close"]'),
-                dialog.get_by_text("×", exact=True),
-                dialog.get_by_text("✕", exact=True),
-                dialog.get_by_text("X", exact=True),
-                dialog.locator("button").last,
-            ]
+    close_candidates = [
+        profile_page.locator('[role="dialog"] [aria-label="Close"]'),
+        profile_page.get_by_text("×", exact=True),
+        profile_page.get_by_text("✕", exact=True),
+        profile_page.locator('[role="dialog"] button'),
+    ]
 
-            for locator in close_candidates:
-                try:
-                    if await locator.count() > 0:
-                        await locator.first.click(timeout=500)
-                        await profile_page.wait_for_timeout(150)
-                        return
-                except Exception:
-                    continue
-    except Exception:
-        pass
+    for locator in close_candidates:
+        try:
+            count = await locator.count()
+        except Exception:
+            count = 0
+
+        for i in range(min(count, 4)):
+            try:
+                await locator.nth(i).click(timeout=700)
+                await profile_page.wait_for_timeout(250)
+                return
+            except Exception:
+                continue
 
     try:
         await profile_page.keyboard.press("Escape")
-        await profile_page.wait_for_timeout(100)
+        await profile_page.wait_for_timeout(200)
     except Exception:
         pass
 
@@ -747,9 +756,9 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
     try:
         dialog = profile_page.locator('[role="dialog"]').last
         if await dialog.count() > 0:
-            txt = await dialog.inner_text(timeout=1200)
-            if txt and "Confirmed info" in txt:
-                print("CONFIRMED INFO MODAL TEXT:", repr(txt[:500]), flush=True)
+            txt = await dialog.inner_text(timeout=2000)
+            if txt:
+                print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
                 return txt
         return ""
     finally:
@@ -762,19 +771,11 @@ def _extract_socials_from_confirmed_modal(modal_text: str) -> str:
 
     flat = re.sub(r"\s+", " ", modal_text).strip()
 
-    patterns = [
-        r"Public\s+@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal Twitter account is verified via Twitter API",
-        r"@([A-Za-z0-9_]{2,15})\s+Talent[’'`]?s personal Twitter account is verified via Twitter API",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, flat, re.I)
-        if m:
-            return f"@{m.group(1)}"
-
-    m = re.search(r"(?<![\w.])@([A-Za-z0-9_]{2,15})\b", flat)
+    m = re.search(r"Public\s+@([A-Za-z0-9_]{2,15})\b", flat, re.I)
     if m:
-        return f"@{m.group(1)}"
+        handle = m.group(1).strip()
+        if handle.lower() not in INVALID_TWITTER_HANDLES:
+            return f"@{handle}"
 
     return ""
 
@@ -785,17 +786,13 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
 
     flat = re.sub(r"\s+", " ", modal_text).strip()
 
-    patterns = [
-        r"Public\s+([A-Za-z0-9 .,'\\-]+?)\s+Talent[’'`]?s location is verified via browser API",
-        r"([A-Za-z0-9 .,'\\-]+?)\s+Talent[’'`]?s location is verified via browser API",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, flat, re.I)
-        if m:
-            value = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
-            if value and "Confirmed info" not in value and "Why is this important" not in value:
-                return value
+    m = re.search(
+        r"Public\s+([A-Za-z][A-Za-z .,'\\-]+?)\s+Talent[’'`]?s location is verified via browser API",
+        flat,
+        re.I,
+    )
+    if m:
+        return m.group(1).strip(" ,.-")
 
     return ""
 
@@ -900,7 +897,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print(f"Opening profile: {card['name']} | {profile_url}")
         await profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
         await _wait_for_profile_ready(profile_page)
-        await profile_page.wait_for_timeout(400)
+        await profile_page.wait_for_timeout(1200)
 
         combined_text, html = await _collect_profile_text(profile_page)
         confirmed_modal_text = await _extract_confirmed_info_modal_text(profile_page)
@@ -908,9 +905,14 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         linkedin, twitter, twitter_handle, youtube = _extract_social_links(full_text)
 
+        if twitter_handle.lower() in {"@intent", "@share", "@home", "@search", "@explore", "@compose", "@i"}:
+            twitter_handle = ""
+            twitter = ""
+
         modal_twitter_handle = _extract_socials_from_confirmed_modal(confirmed_modal_text)
         if modal_twitter_handle:
             twitter_handle = modal_twitter_handle
+            twitter = ""
 
         email = _extract_public_email(full_text)
         top_views = await _extract_top_views(profile_page)
@@ -919,8 +921,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         years = _extract_years_of_experience(full_text)
         open_for_work = _detect_open_to_work_text(full_text)
 
-        modal_location = _extract_location_from_confirmed_modal(confirmed_modal_text)
-        location = modal_location or ""
+        location = _extract_location_from_confirmed_modal(confirmed_modal_text)
 
         primary_role = (
             DISPLAY_ROLE_ALIASES.get(card["role"])
@@ -952,7 +953,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print("VIEWS PARSED:", rec.views)
         print("CREATORS PARSED:", rec.creators_worked_with)
         print("NICHE PARSED:", rec.niche)
-        print("MODAL RAW TEXT:", repr(confirmed_modal_text[:500]))
+        print("MODAL RAW TEXT:", repr(confirmed_modal_text[:700]))
         print("LOCATION PARSED:", rec.location)
         print("TWITTER HANDLE PARSED:", rec.twitter_handle)
         print("ROLE PARSED:", rec.job_role)
@@ -971,9 +972,9 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
     print(f"Scraping directory page {page_no}: {url}")
 
     await page.goto(url, wait_until="networkidle", timeout=90000)
-    await page.wait_for_timeout(1500)
+    await page.wait_for_timeout(3000)
     await _accept_cookies(page)
-    await page.wait_for_timeout(400)
+    await page.wait_for_timeout(1200)
 
     title = await page.title()
     body_preview = await page.locator("body").inner_text()
@@ -1008,7 +1009,7 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
         seen_record_keys.add(dedupe_key)
         records.append(rec)
 
-        await page.wait_for_timeout(100)
+        await page.wait_for_timeout(500)
 
     print(f"Directory page {page_no} valid records found: {len(records)}")
     return records
@@ -1157,7 +1158,7 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
                 continue
 
             all_records.extend(records)
-            await page.wait_for_timeout(150)
+            await page.wait_for_timeout(800)
 
         await browser.close()
 
