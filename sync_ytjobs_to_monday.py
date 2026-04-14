@@ -652,55 +652,170 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
     return combined_text, html
 
 
+async def _debug_confirmed_info_area(profile_page: Page) -> None:
+    try:
+        body_text = await profile_page.locator("body").inner_text(timeout=2000)
+        print("BODY AFTER CLICK PREVIEW:", repr(body_text[:1500]), flush=True)
+    except Exception:
+        pass
+
+    try:
+        dialog_count = await profile_page.locator('[role="dialog"]').count()
+        print("DIALOG COUNT:", dialog_count, flush=True)
+    except Exception:
+        pass
+
+    try:
+        openish_count = await profile_page.locator(
+            '[data-state="open"], [aria-modal="true"], [role="tooltip"], .modal, .popover'
+        ).count()
+        print("OPENISH COUNT:", openish_count, flush=True)
+    except Exception:
+        pass
+
+
+def _looks_like_confirmed_info_text(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return (
+        "why is this important" in lowered
+        or "location is verified via browser api" in lowered
+        or ("confirmed info" in lowered and "public" in lowered)
+    )
+
+
+async def _extract_open_popup_text(profile_page: Page) -> str:
+    popup_locators = [
+        profile_page.locator('[role="dialog"]').last,
+        profile_page.locator('[aria-modal="true"]').last,
+        profile_page.locator('[data-state="open"]').last,
+        profile_page.locator('[role="tooltip"]').last,
+        profile_page.locator('.modal').last,
+        profile_page.locator('.popover').last,
+    ]
+
+    for loc in popup_locators:
+        try:
+            if await loc.count() == 0:
+                continue
+            txt = await loc.inner_text(timeout=2000)
+            if txt and _looks_like_confirmed_info_text(txt):
+                return txt
+        except Exception:
+            continue
+
+    try:
+        body_text = await profile_page.locator("body").inner_text(timeout=2000)
+        if _looks_like_confirmed_info_text(body_text):
+            return body_text
+    except Exception:
+        pass
+
+    return ""
+
+
+async def _click_locator_best_effort(locator) -> bool:
+    try:
+        if await locator.count() == 0:
+            return False
+        await locator.scroll_into_view_if_needed()
+        await locator.click(force=True, timeout=2500)
+        return True
+    except Exception:
+        try:
+            await locator.evaluate("(el) => el.click()")
+            return True
+        except Exception:
+            return False
+
+
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
-    candidates = [
+    section_candidates = [
+        profile_page.get_by_text("Confirmed info", exact=True).first,
+        profile_page.get_by_text("Confirmed info", exact=False).first,
+    ]
+
+    click_candidates = []
+
+    for section in section_candidates:
+        try:
+            if await section.count() == 0:
+                continue
+
+            parent1 = section.locator("xpath=ancestor::*[self::div or self::section or self::article][1]").first
+            parent2 = section.locator("xpath=ancestor::*[self::div or self::section or self::article][2]").first
+            parent3 = section.locator("xpath=ancestor::*[self::div or self::section or self::article][3]").first
+
+            click_candidates.extend([
+                section,
+                parent1,
+                parent2,
+                parent3,
+                section.locator("xpath=following::*[name()='svg'][1]").first,
+                section.locator("xpath=following::*[name()='svg'][1]/ancestor::*[self::button or self::a or self::div][1]").first,
+                parent1.locator("svg").nth(0),
+                parent1.locator("svg").nth(1),
+                parent1.locator("xpath=.//*[self::button or self::a]").nth(0),
+                parent1.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(0),
+                parent2.locator("svg").nth(0),
+                parent2.locator("svg").nth(1),
+                parent2.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(0),
+                parent2.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(1),
+                parent3.locator("svg").nth(0),
+                parent3.locator("svg").nth(1),
+                parent3.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(0),
+                parent3.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(1),
+            ])
+        except Exception:
+            continue
+
+    # keep your old absolute fallback too, but last
+    click_candidates.extend([
         profile_page.locator(
             "xpath=/html/body/div[2]/main/div/section[2]/section/section/div[1]/div[1]/div[5]"
         ).first,
-        profile_page.get_by_text("Confirmed info", exact=True).first,
-    ]
+        profile_page.locator(
+            "xpath=/html/body/div[2]/main/div/section[2]/section/section/div[1]/div[1]/div[5]//*[name()='svg']"
+        ).first,
+    ])
 
-    for candidate in candidates:
+    for idx, candidate in enumerate(click_candidates, start=1):
         try:
             if await candidate.count() == 0:
                 continue
 
             await candidate.scroll_into_view_if_needed()
-            await profile_page.wait_for_timeout(200)
+            await profile_page.wait_for_timeout(250)
 
-            try:
-                await candidate.click(timeout=1500)
-            except Exception:
-                await candidate.evaluate("(el) => el.click()")
+            clicked = await _click_locator_best_effort(candidate)
+            if not clicked:
+                continue
 
-            await profile_page.wait_for_timeout(800)
+            await profile_page.wait_for_timeout(1400)
 
-            dialog = profile_page.locator('[role="dialog"]').last
-            if await dialog.count() > 0:
-                txt = await dialog.inner_text(timeout=1500)
-                if txt and "Confirmed info" in txt:
-                    print("Confirmed info modal opened.", flush=True)
-                    return True
-
-            body_text = await profile_page.locator("body").inner_text(timeout=1200)
-            if "Confirmed info" in body_text and "Why is this important?" in body_text:
-                print("Confirmed info modal opened.", flush=True)
+            popup_text = await _extract_open_popup_text(profile_page)
+            if popup_text:
+                print(f"Confirmed info modal opened with candidate #{idx}.", flush=True)
                 return True
 
         except Exception as e:
-            print(f"Confirmed info click attempt failed: {e}", flush=True)
+            print(f"Confirmed info click attempt #{idx} failed: {e}", flush=True)
             continue
 
     print("Could not open Confirmed info modal.", flush=True)
+    await _debug_confirmed_info_area(profile_page)
     return False
 
 
 async def _close_modal_if_open(profile_page: Page) -> None:
     close_candidates = [
         profile_page.locator('[role="dialog"] [aria-label="Close"]'),
+        profile_page.locator('[aria-modal="true"] [aria-label="Close"]'),
         profile_page.get_by_text("×", exact=True),
         profile_page.get_by_text("✕", exact=True),
         profile_page.locator('[role="dialog"] button'),
+        profile_page.locator('[aria-modal="true"] button'),
     ]
 
     for locator in close_candidates:
@@ -709,7 +824,7 @@ async def _close_modal_if_open(profile_page: Page) -> None:
         except Exception:
             count = 0
 
-        for i in range(min(count, 4)):
+        for i in range(min(count, 6)):
             try:
                 await locator.nth(i).click(timeout=700)
                 await profile_page.wait_for_timeout(250)
@@ -730,11 +845,7 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
         return ""
 
     try:
-        dialog = profile_page.locator('[role="dialog"]').last
-        if await dialog.count() == 0:
-            return ""
-
-        txt = await dialog.inner_text(timeout=2000)
+        txt = await _extract_open_popup_text(profile_page)
         if txt:
             print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
             return txt
@@ -848,6 +959,7 @@ async def _extract_creators(profile_page: Page, combined_text: str) -> str:
                 if not text:
                     continue
 
+                    # kept same behavior style as your file
                 for line in text.splitlines():
                     cleaned = re.sub(r"\s+", " ", line).strip()
                     if _looks_like_creator_name(cleaned):
@@ -1271,11 +1383,9 @@ def main() -> None:
     print(f"Skipped unmapped role: {skipped_unmapped}")
     print(f"Failed: {failed}")
 
-    if len(records) > 0 and created == 0:
-        print(
-            "WARNING: Scrape completed but 0 monday items were created. "
-            "Either all records already existed, were filtered, were unmapped, or monday rejected the writes."
-        )
+    if len(records) > 0:
+        print(f"Processed rate: {((created + skipped_existing + skipped_not_open_for_work + skipped_unmapped + failed) / len(records)):.1%}")
+        print(f"Create success rate: {(created / len(records)):.1%}")
 
 
 if __name__ == "__main__":
