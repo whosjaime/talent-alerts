@@ -369,31 +369,6 @@ def _clean_social(url: str) -> str:
     return url.rstrip(".,);]}>\"'")
 
 
-def _extract_twitter_handle(text: str) -> str:
-    if not text:
-        return ""
-
-    text_without_emails = re.sub(
-        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-        " ",
-        text,
-    )
-
-    m = re.search(
-        r"(?:twitter\.com|x\.com)/(?!intent\b)([A-Za-z0-9_]{2,15})\b",
-        text_without_emails,
-        re.I,
-    )
-    if not m:
-        return ""
-
-    handle = m.group(1).strip()
-    if handle.lower() in INVALID_TWITTER_HANDLES:
-        return ""
-
-    return f"@{handle}"
-
-
 def _extract_social_links(text: str) -> tuple[str, str, str, str]:
     linkedin = ""
     twitter = ""
@@ -415,6 +390,8 @@ def _extract_social_links(text: str) -> tuple[str, str, str, str]:
     twitter_patterns = [
         r"https?://(?:www\.)?(?:twitter\.com|x\.com)/(?!intent\b)([A-Za-z0-9_]{2,15})\b",
         r"(?:twitter\.com|x\.com)/(?!intent\b)([A-Za-z0-9_]{2,15})\b",
+        r"(?:discord|twitter|x)\s*[:\-]?\s*@([A-Za-z0-9_]{2,15})\b",
+        r"@([A-Za-z0-9_]{2,15})\b",
     ]
     for pattern in twitter_patterns:
         m = re.search(pattern, text, re.I)
@@ -631,6 +608,7 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
         "Roles",
         "Categories",
         "Confirmed info",
+        "Links",
     ]
 
     for label in labels:
@@ -650,6 +628,40 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
     combined_text = "\n\n".join(_dedupe_keep_order(sections + [body_text]))
     return combined_text, html
+
+
+def _looks_like_confirmed_info_text(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return (
+        "why is this important" in lowered
+        or "location is verified via browser api" in lowered
+        or ("confirmed info" in lowered and "browser api" in lowered)
+    )
+
+
+async def _extract_open_popup_text(profile_page: Page) -> str:
+    popup_locators = [
+        profile_page.locator('[role="dialog"]:visible').last,
+        profile_page.locator('[aria-modal="true"]:visible').last,
+        profile_page.locator('[data-state="open"]:visible').last,
+        profile_page.locator('[role="tooltip"]:visible').last,
+        profile_page.locator('.modal:visible').last,
+        profile_page.locator('.popover:visible').last,
+    ]
+
+    for loc in popup_locators:
+        try:
+            if await loc.count() == 0:
+                continue
+            txt = await loc.inner_text(timeout=2000)
+            if txt and _looks_like_confirmed_info_text(txt):
+                return txt
+        except Exception:
+            continue
+
+    return ""
 
 
 async def _debug_confirmed_info_area(profile_page: Page) -> None:
@@ -674,47 +686,6 @@ async def _debug_confirmed_info_area(profile_page: Page) -> None:
         pass
 
 
-def _looks_like_confirmed_info_text(text: str) -> bool:
-    if not text:
-        return False
-    lowered = text.lower()
-    return (
-        "why is this important" in lowered
-        or "location is verified via browser api" in lowered
-        or ("confirmed info" in lowered and "public" in lowered)
-    )
-
-
-async def _extract_open_popup_text(profile_page: Page) -> str:
-    popup_locators = [
-        profile_page.locator('[role="dialog"]').last,
-        profile_page.locator('[aria-modal="true"]').last,
-        profile_page.locator('[data-state="open"]').last,
-        profile_page.locator('[role="tooltip"]').last,
-        profile_page.locator('.modal').last,
-        profile_page.locator('.popover').last,
-    ]
-
-    for loc in popup_locators:
-        try:
-            if await loc.count() == 0:
-                continue
-            txt = await loc.inner_text(timeout=2000)
-            if txt and _looks_like_confirmed_info_text(txt):
-                return txt
-        except Exception:
-            continue
-
-    try:
-        body_text = await profile_page.locator("body").inner_text(timeout=2000)
-        if _looks_like_confirmed_info_text(body_text):
-            return body_text
-    except Exception:
-        pass
-
-    return ""
-
-
 async def _click_locator_best_effort(locator) -> bool:
     try:
         if await locator.count() == 0:
@@ -731,76 +702,55 @@ async def _click_locator_best_effort(locator) -> bool:
 
 
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
-    section_candidates = [
-        profile_page.get_by_text("Confirmed info", exact=True).first,
-        profile_page.get_by_text("Confirmed info", exact=False).first,
+    label = profile_page.get_by_text("Confirmed info", exact=True).first
+    if await label.count() == 0:
+        print("Confirmed info label not found.", flush=True)
+        return False
+
+    row_candidates = [
+        label.locator("xpath=ancestor::div[1]").first,
+        label.locator("xpath=ancestor::div[2]").first,
+        label.locator("xpath=ancestor::div[3]").first,
+        label.locator("xpath=ancestor::section[1]").first,
     ]
 
-    click_candidates = []
-
-    for section in section_candidates:
+    for row_idx, row in enumerate(row_candidates, start=1):
         try:
-            if await section.count() == 0:
+            if await row.count() == 0:
                 continue
 
-            parent1 = section.locator("xpath=ancestor::*[self::div or self::section or self::article][1]").first
-            parent2 = section.locator("xpath=ancestor::*[self::div or self::section or self::article][2]").first
-            parent3 = section.locator("xpath=ancestor::*[self::div or self::section or self::article][3]").first
+            click_groups = [
+                row.locator("button"),
+                row.locator('[role="button"]'),
+                row.locator("a"),
+                row.locator("svg").locator("xpath=ancestor::*[self::button or self::a or self::div][1]"),
+                row.locator("svg"),
+            ]
 
-            click_candidates.extend([
-                section,
-                parent1,
-                parent2,
-                parent3,
-                section.locator("xpath=following::*[name()='svg'][1]").first,
-                section.locator("xpath=following::*[name()='svg'][1]/ancestor::*[self::button or self::a or self::div][1]").first,
-                parent1.locator("svg").nth(0),
-                parent1.locator("svg").nth(1),
-                parent1.locator("xpath=.//*[self::button or self::a]").nth(0),
-                parent1.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(0),
-                parent2.locator("svg").nth(0),
-                parent2.locator("svg").nth(1),
-                parent2.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(0),
-                parent2.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(1),
-                parent3.locator("svg").nth(0),
-                parent3.locator("svg").nth(1),
-                parent3.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(0),
-                parent3.locator("xpath=.//*[name()='svg']/ancestor::*[self::button or self::a or self::div][1]").nth(1),
-            ])
+            for group_idx, group in enumerate(click_groups, start=1):
+                try:
+                    count = await group.count()
+                except Exception:
+                    count = 0
+
+                for i in range(min(count, 8)):
+                    target = group.nth(i)
+                    try:
+                        clicked = await _click_locator_best_effort(target)
+                        if not clicked:
+                            continue
+
+                        await profile_page.wait_for_timeout(1200)
+                        popup_text = await _extract_open_popup_text(profile_page)
+                        if popup_text:
+                            print(
+                                f"Confirmed info modal opened from row {row_idx}, group {group_idx}, target {i}.",
+                                flush=True,
+                            )
+                            return True
+                    except Exception:
+                        continue
         except Exception:
-            continue
-
-    # keep your old absolute fallback too, but last
-    click_candidates.extend([
-        profile_page.locator(
-            "xpath=/html/body/div[2]/main/div/section[2]/section/section/div[1]/div[1]/div[5]"
-        ).first,
-        profile_page.locator(
-            "xpath=/html/body/div[2]/main/div/section[2]/section/section/div[1]/div[1]/div[5]//*[name()='svg']"
-        ).first,
-    ])
-
-    for idx, candidate in enumerate(click_candidates, start=1):
-        try:
-            if await candidate.count() == 0:
-                continue
-
-            await candidate.scroll_into_view_if_needed()
-            await profile_page.wait_for_timeout(250)
-
-            clicked = await _click_locator_best_effort(candidate)
-            if not clicked:
-                continue
-
-            await profile_page.wait_for_timeout(1400)
-
-            popup_text = await _extract_open_popup_text(profile_page)
-            if popup_text:
-                print(f"Confirmed info modal opened with candidate #{idx}.", flush=True)
-                return True
-
-        except Exception as e:
-            print(f"Confirmed info click attempt #{idx} failed: {e}", flush=True)
             continue
 
     print("Could not open Confirmed info modal.", flush=True)
@@ -862,6 +812,8 @@ def _extract_socials_from_confirmed_modal(modal_text: str) -> str:
 
     m = re.search(r"Public\s+@([A-Za-z0-9_]{2,15})\b", flat, re.I)
     if not m:
+        m = re.search(r"(?:twitter|x|discord)\s*[:\-]?\s*@([A-Za-z0-9_]{2,15})\b", flat, re.I)
+    if not m:
         return ""
 
     handle = m.group(1).strip()
@@ -877,19 +829,20 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
 
     flat = re.sub(r"\s+", " ", modal_text).strip()
 
-    m = re.search(
+    patterns = [
         r"Public\s+(.+?)\s+Talent[’'`]?s location is verified via browser API",
-        flat,
-        re.I,
-    )
-    if not m:
-        return ""
+        r"Location\s*[:\-]?\s*([A-Za-z0-9 ,.'/-]+)",
+    ]
 
-    location = m.group(1).strip(" ,.-")
-    if "Confirmed info" in location or "Why is this important" in location:
-        return ""
+    for pattern in patterns:
+        m = re.search(pattern, flat, re.I)
+        if m:
+            location = m.group(1).strip(" ,.-")
+            if "Confirmed info" in location or "Why is this important" in location:
+                continue
+            return location
 
-    return location
+    return ""
 
 
 async def _extract_top_views(profile_page: Page) -> float | None:
@@ -958,8 +911,6 @@ async def _extract_creators(profile_page: Page, combined_text: str) -> str:
                 text = (await locator.nth(i).inner_text(timeout=1000)).strip()
                 if not text:
                     continue
-
-                    # kept same behavior style as your file
                 for line in text.splitlines():
                     cleaned = re.sub(r"\s+", " ", line).strip()
                     if _looks_like_creator_name(cleaned):
@@ -1104,7 +1055,6 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
 
         seen_record_keys.add(dedupe_key)
         records.append(rec)
-
         await page.wait_for_timeout(500)
 
     print(f"Directory page {page_no} valid records found: {len(records)}")
