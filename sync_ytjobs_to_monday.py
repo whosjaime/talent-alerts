@@ -538,7 +538,7 @@ async def _accept_cookies(page: Page) -> None:
 async def _wait_for_profile_ready(profile_page: Page) -> None:
     await profile_page.wait_for_load_state("domcontentloaded")
     try:
-        await profile_page.wait_for_load_state("networkidle", timeout=10000)
+        await profile_page.wait_for_load_state("networkidle", timeout=6000)
     except Exception:
         pass
 
@@ -551,12 +551,12 @@ async def _wait_for_profile_ready(profile_page: Page) -> None:
 
     for locator in anchors:
         try:
-            await locator.wait_for(timeout=5000)
+            await locator.wait_for(timeout=3000)
             return
         except Exception:
             continue
 
-    await profile_page.wait_for_timeout(1500)
+    await profile_page.wait_for_timeout(600)
 
 
 async def _get_visible_cards(page: Page) -> list[dict]:
@@ -644,30 +644,15 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 
 async def _wait_for_confirmed_info_dialog(profile_page: Page) -> bool:
-    candidates = [
-        profile_page.locator('[role="dialog"]').last,
-        profile_page.locator('[aria-modal="true"]').last,
-    ]
-
-    for locator in candidates:
-        try:
-            if await locator.count() == 0:
-                continue
-            await locator.wait_for(state="visible", timeout=2500)
-            txt = await locator.inner_text(timeout=1500)
-            if txt and "Confirmed info" in txt:
-                return True
-        except Exception:
-            continue
-
     try:
-        body_text = await profile_page.locator("body").inner_text(timeout=1500)
-        if "Confirmed info" in body_text and "Why is this important?" in body_text:
-            return True
+        dialog = profile_page.locator('[role="dialog"]').last
+        if await dialog.count() == 0:
+            return False
+        await dialog.wait_for(state="visible", timeout=800)
+        txt = await dialog.inner_text(timeout=800)
+        return bool(txt and "Confirmed info" in txt)
     except Exception:
-        pass
-
-    return False
+        return False
 
 
 async def _click_confirmed_info_candidate(profile_page: Page, candidate) -> bool:
@@ -676,48 +661,34 @@ async def _click_confirmed_info_candidate(profile_page: Page, candidate) -> bool
     except Exception:
         pass
 
-    await profile_page.wait_for_timeout(250)
-
-    click_attempts = [
-        lambda: candidate.click(timeout=2000),
-        lambda: candidate.click(timeout=2000, force=True),
-        lambda: candidate.evaluate(
-            """
-            (el) => {
-                const target =
-                    el.closest('button,[role="button"],a') ||
-                    el.querySelector?.('button,[role="button"],a') ||
-                    el.parentElement ||
-                    el;
-                target.click();
-            }
-            """
-        ),
-    ]
-
-    for click_attempt in click_attempts:
+    try:
+        await candidate.click(timeout=800)
+    except Exception:
         try:
-            await click_attempt()
-            await profile_page.wait_for_timeout(900)
-            if await _wait_for_confirmed_info_dialog(profile_page):
-                return True
+            await candidate.evaluate(
+                """
+                (el) => {
+                    const target =
+                        el.closest('button,[role="button"],a') ||
+                        el.querySelector?.('button,[role="button"],a') ||
+                        el;
+                    target.click();
+                }
+                """
+            )
         except Exception:
-            continue
+            return False
 
-    return False
+    await profile_page.wait_for_timeout(250)
+    return await _wait_for_confirmed_info_dialog(profile_page)
 
 
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
     candidates = [
         profile_page.get_by_text("Confirmed info", exact=True),
-        profile_page.locator(
-            "xpath=//*[normalize-space(text())='Confirmed info']/ancestor::*[self::div or self::section or self::button or self::a][1]"
-        ),
-        profile_page.locator("button, a, [role='button']").filter(has_text="Confirmed info"),
+        profile_page.locator("[role='button'], button, a").filter(has_text="Confirmed info"),
         profile_page.locator("div, section").filter(has_text="Confirmed info"),
     ]
-
-    attempts = 0
 
     for locator in candidates:
         try:
@@ -725,38 +696,36 @@ async def _open_confirmed_info_modal(profile_page: Page) -> bool:
         except Exception:
             count = 0
 
-        for i in range(min(count, 8)):
-            attempts += 1
+        for i in range(min(count, 2)):
             try:
                 candidate = locator.nth(i)
                 if await _click_confirmed_info_candidate(profile_page, candidate):
-                    print("Confirmed info modal opened.")
+                    print("Confirmed info modal opened.", flush=True)
                     return True
-            except Exception as e:
-                print(f"Confirmed info click attempt failed: {e}")
+            except Exception:
                 continue
 
-    print(f"Could not open Confirmed info modal. attempts={attempts}")
+    print("Could not open Confirmed info modal.", flush=True)
     return False
 
 
 async def _close_modal_if_open(profile_page: Page) -> None:
-    dialog = profile_page.locator('[role="dialog"], [aria-modal="true"]').last
-
     try:
+        dialog = profile_page.locator('[role="dialog"]').last
         if await dialog.count() > 0:
             close_candidates = [
                 dialog.locator('[aria-label="Close"]'),
                 dialog.get_by_text("×", exact=True),
                 dialog.get_by_text("✕", exact=True),
                 dialog.get_by_text("X", exact=True),
+                dialog.locator("button").last,
             ]
 
             for locator in close_candidates:
                 try:
                     if await locator.count() > 0:
-                        await locator.first.click(timeout=1000)
-                        await profile_page.wait_for_timeout(300)
+                        await locator.first.click(timeout=500)
+                        await profile_page.wait_for_timeout(150)
                         return
                 except Exception:
                     continue
@@ -765,7 +734,7 @@ async def _close_modal_if_open(profile_page: Page) -> None:
 
     try:
         await profile_page.keyboard.press("Escape")
-        await profile_page.wait_for_timeout(250)
+        await profile_page.wait_for_timeout(100)
     except Exception:
         pass
 
@@ -776,26 +745,12 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
         return ""
 
     try:
-        await profile_page.wait_for_timeout(400)
-
-        candidates = [
-            profile_page.locator('[role="dialog"]').last,
-            profile_page.locator('[aria-modal="true"]').last,
-            profile_page.locator("body"),
-        ]
-
-        for loc in candidates:
-            try:
-                if await loc.count() == 0:
-                    continue
-                txt = await loc.inner_text(timeout=2500)
-                if txt and "Confirmed info" in txt:
-                    print("CONFIRMED INFO MODAL TEXT:")
-                    print(txt[:1500])
-                    return txt
-            except Exception:
-                continue
-
+        dialog = profile_page.locator('[role="dialog"]').last
+        if await dialog.count() > 0:
+            txt = await dialog.inner_text(timeout=1200)
+            if txt and "Confirmed info" in txt:
+                print("CONFIRMED INFO MODAL TEXT:", repr(txt[:500]), flush=True)
+                return txt
         return ""
     finally:
         await _close_modal_if_open(profile_page)
@@ -945,7 +900,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print(f"Opening profile: {card['name']} | {profile_url}")
         await profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
         await _wait_for_profile_ready(profile_page)
-        await profile_page.wait_for_timeout(1200)
+        await profile_page.wait_for_timeout(400)
 
         combined_text, html = await _collect_profile_text(profile_page)
         confirmed_modal_text = await _extract_confirmed_info_modal_text(profile_page)
@@ -997,7 +952,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print("VIEWS PARSED:", rec.views)
         print("CREATORS PARSED:", rec.creators_worked_with)
         print("NICHE PARSED:", rec.niche)
-        print("MODAL RAW TEXT:", repr(confirmed_modal_text[:800]))
+        print("MODAL RAW TEXT:", repr(confirmed_modal_text[:500]))
         print("LOCATION PARSED:", rec.location)
         print("TWITTER HANDLE PARSED:", rec.twitter_handle)
         print("ROLE PARSED:", rec.job_role)
@@ -1016,9 +971,9 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
     print(f"Scraping directory page {page_no}: {url}")
 
     await page.goto(url, wait_until="networkidle", timeout=90000)
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(1500)
     await _accept_cookies(page)
-    await page.wait_for_timeout(1200)
+    await page.wait_for_timeout(400)
 
     title = await page.title()
     body_preview = await page.locator("body").inner_text()
@@ -1053,7 +1008,7 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
         seen_record_keys.add(dedupe_key)
         records.append(rec)
 
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(100)
 
     print(f"Directory page {page_no} valid records found: {len(records)}")
     return records
@@ -1202,7 +1157,7 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
                 continue
 
             all_records.extend(records)
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(150)
 
         await browser.close()
 
@@ -1236,6 +1191,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    print(
+        f"STARTING RUN | max_pages={args.max_pages} | headless={args.headless} | "
+        f"dry_run={args.dry_run} | open_for_work_only={args.open_for_work_only}",
+        flush=True,
+    )
+
     if not MONDAY_API_TOKEN and not args.dry_run:
         raise RuntimeError("MONDAY_API_TOKEN is required unless --dry-run is enabled")
 
@@ -1243,9 +1204,9 @@ def main() -> None:
     existing = set()
 
     if monday:
-        print("Loading existing monday YTJobs profile links...")
+        print("Loading existing monday YTJobs profile links...", flush=True)
         existing = monday.get_existing_profile_links(MONDAY_BOARD_ID, MONDAY_COLUMNS["ytjobs_profile_link"])
-        print(f"Existing monday links: {len(existing)}")
+        print(f"Existing monday links: {len(existing)}", flush=True)
 
     records = asyncio.run(scrape(args.max_pages, args.headless))
     print(f"Total scraped valid records: {len(records)}")
