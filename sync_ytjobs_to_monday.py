@@ -16,6 +16,10 @@ SEARCH_URL = "https://ytjobs.co/talent/search/all_categories?page={page}"
 
 MONDAY_API_TOKEN = os.getenv("MONDAY_API_TOKEN", "")
 
+INVALID_TWITTER_HANDLES = {
+    "intent", "share", "home", "search", "explore", "compose", "i"
+}
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -179,10 +183,6 @@ GENERIC_CREATOR_WORDS = {
     "categories", "confirmed info", "hire me", "open to work", "views", "subscribers",
     "youtube", "linkedin", "twitter", "x", "instagram", "tiktok", "public", "private",
     "videos", "likes", "profile", "clients", "timeline", "posts", "see more",
-}
-
-INVALID_TWITTER_HANDLES = {
-    "intent", "share", "home", "search", "explore", "compose", "i"
 }
 
 
@@ -653,67 +653,43 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
-    try:
-        opened = await profile_page.evaluate(
-            """
-            () => {
-                const textNodes = Array.from(document.querySelectorAll('*'));
-                const label = textNodes.find(el => (el.textContent || '').trim() === 'Confirmed info');
-                if (!label) return false;
+    candidates = [
+        profile_page.locator(
+            "xpath=/html/body/div[2]/main/div/section[2]/section/section/div[1]/div[1]/div[5]"
+        ).first,
+        profile_page.get_by_text("Confirmed info", exact=True).first,
+    ]
 
-                let node = label;
-                for (let i = 0; i < 8 && node; i++) {
-                    const rect = node.getBoundingClientRect();
-                    const text = (node.textContent || '').trim().toLowerCase();
-                    const hasSvg = !!node.querySelector('svg');
-                    const hasImg = !!node.querySelector('img');
-                    const style = window.getComputedStyle(node);
-                    const clickable =
-                        node.tagName === 'BUTTON' ||
-                        node.tagName === 'A' ||
-                        node.getAttribute('role') === 'button' ||
-                        style.cursor === 'pointer' ||
-                        typeof node.onclick === 'function';
+    for candidate in candidates:
+        try:
+            if await candidate.count() == 0:
+                continue
 
-                    const looksLikeCard =
-                        rect.width >= 140 &&
-                        rect.height >= 50 &&
-                        text.includes('confirmed info') &&
-                        (hasSvg || hasImg);
+            await candidate.scroll_into_view_if_needed()
+            await profile_page.wait_for_timeout(200)
 
-                    if (looksLikeCard || clickable) {
-                        node.click();
-                        return true;
-                    }
+            try:
+                await candidate.click(timeout=1500)
+            except Exception:
+                await candidate.evaluate("(el) => el.click()")
 
-                    node = node.parentElement;
-                }
+            await profile_page.wait_for_timeout(800)
 
-                return false;
-            }
-            """
-        )
+            dialog = profile_page.locator('[role="dialog"]').last
+            if await dialog.count() > 0:
+                txt = await dialog.inner_text(timeout=1500)
+                if txt and "Confirmed info" in txt:
+                    print("Confirmed info modal opened.", flush=True)
+                    return True
 
-        if not opened:
-            print("Could not click Confirmed info box.", flush=True)
-            return False
-
-        await profile_page.wait_for_timeout(700)
-
-        dialog = profile_page.locator('[role="dialog"]').last
-        if await dialog.count() > 0:
-            txt = await dialog.inner_text(timeout=1200)
-            if txt and "Confirmed info" in txt:
+            body_text = await profile_page.locator("body").inner_text(timeout=1200)
+            if "Confirmed info" in body_text and "Why is this important?" in body_text:
                 print("Confirmed info modal opened.", flush=True)
                 return True
 
-        body_text = await profile_page.locator("body").inner_text(timeout=1200)
-        if "Confirmed info" in body_text and "Why is this important?" in body_text:
-            print("Confirmed info modal opened.", flush=True)
-            return True
-
-    except Exception as e:
-        print(f"Confirmed info modal click failed: {e}", flush=True)
+        except Exception as e:
+            print(f"Confirmed info click attempt failed: {e}", flush=True)
+            continue
 
     print("Could not open Confirmed info modal.", flush=True)
     return False
@@ -755,11 +731,13 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
 
     try:
         dialog = profile_page.locator('[role="dialog"]').last
-        if await dialog.count() > 0:
-            txt = await dialog.inner_text(timeout=2000)
-            if txt:
-                print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
-                return txt
+        if await dialog.count() == 0:
+            return ""
+
+        txt = await dialog.inner_text(timeout=2000)
+        if txt:
+            print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
+            return txt
         return ""
     finally:
         await _close_modal_if_open(profile_page)
@@ -772,12 +750,14 @@ def _extract_socials_from_confirmed_modal(modal_text: str) -> str:
     flat = re.sub(r"\s+", " ", modal_text).strip()
 
     m = re.search(r"Public\s+@([A-Za-z0-9_]{2,15})\b", flat, re.I)
-    if m:
-        handle = m.group(1).strip()
-        if handle.lower() not in INVALID_TWITTER_HANDLES:
-            return f"@{handle}"
+    if not m:
+        return ""
 
-    return ""
+    handle = m.group(1).strip()
+    if handle.lower() in INVALID_TWITTER_HANDLES:
+        return ""
+
+    return f"@{handle}"
 
 
 def _extract_location_from_confirmed_modal(modal_text: str) -> str:
@@ -787,14 +767,18 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
     flat = re.sub(r"\s+", " ", modal_text).strip()
 
     m = re.search(
-        r"Public\s+([A-Za-z][A-Za-z .,'\\-]+?)\s+Talent[’'`]?s location is verified via browser API",
+        r"Public\s+(.+?)\s+Talent[’'`]?s location is verified via browser API",
         flat,
         re.I,
     )
-    if m:
-        return m.group(1).strip(" ,.-")
+    if not m:
+        return ""
 
-    return ""
+    location = m.group(1).strip(" ,.-")
+    if "Confirmed info" in location or "Why is this important" in location:
+        return ""
+
+    return location
 
 
 async def _extract_top_views(profile_page: Page) -> float | None:
