@@ -1297,8 +1297,14 @@ class MondayClient:
             if not cursor:
                 break
 
-            data = self._post(next_query, {"cursor": cursor})
-            page = data["next_items_page"]
+            try:
+                data = self._post(next_query, {"cursor": cursor})
+                page = data["next_items_page"]
+            except RuntimeError as e:
+                if "CursorExpiredError" in str(e) or "CursorException" in str(e):
+                    print("MONDAY cursor expired; stopping pagination and using links collected so far.", flush=True)
+                    break
+                raise
 
         return results
 
