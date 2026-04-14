@@ -4,7 +4,8 @@ import asyncio
 import json
 import os
 import re
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, asdict, field
 from urllib.parse import urljoin
 
 import httpx
@@ -514,13 +515,24 @@ def _extract_location_from_page_text(text: str) -> str:
     patterns = [
         r"\bLocation\s*:\s*([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
         r"\bbased in\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
+        r"\bfrom\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
     ]
 
     blocked_exact = {
-        "Editor", "Video Editor", "Channel Manager", "Creative Director",
-        "Thumbnail Designer", "Scriptwriter", "Producer", "Strategist",
-        "Our Childhood", "Dying",
+        "Our Childhood",
+        "Dying",
     }
+
+    blocked_contains = [
+        "working with",
+        "attention to detail",
+        "turn overs",
+        "scratch",
+        "let",
+        "package",
+        "world’s biggest",
+        "world's biggest",
+    ]
 
     for pattern in patterns:
         m = re.search(pattern, clean)
@@ -528,11 +540,12 @@ def _extract_location_from_page_text(text: str) -> str:
             continue
 
         location = m.group(1).strip(" ,.-")
-        if not location:
+
+        if len(location) < 3 or len(location) > 40:
             continue
         if location in blocked_exact:
             continue
-        if len(location) < 3 or len(location) > 40:
+        if any(x.lower() in location.lower() for x in blocked_contains):
             continue
 
         return location
@@ -666,9 +679,9 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 async def _extract_open_popup_text(profile_page: Page) -> str:
     popup_locators = [
         profile_page.locator('[data-testid="gray-popup-section"]:visible').last,
-        profile_page.locator('[role="tooltip"]:visible').last,
         profile_page.locator('[role="dialog"]:visible').last,
         profile_page.locator('[aria-modal="true"]:visible').last,
+        profile_page.locator('[role="tooltip"]:visible').last,
         profile_page.locator('[data-state="open"]:visible').last,
         profile_page.locator('.popover:visible').last,
         profile_page.locator('.modal:visible').last,
@@ -689,8 +702,7 @@ async def _extract_open_popup_text(profile_page: Page) -> str:
                     title: el.getAttribute('title') || '',
                     dataTip: el.getAttribute('data-tip') || '',
                     dataTooltip: el.getAttribute('data-tooltip') || '',
-                    text: el.textContent || '',
-                    html: el.innerHTML || ''
+                    text: el.textContent || ''
                 })
             """)
             combined = " ".join([
@@ -700,8 +712,9 @@ async def _extract_open_popup_text(profile_page: Page) -> str:
                 attrs.get("dataTooltip", ""),
                 attrs.get("text", ""),
             ]).strip()
+            combined = re.sub(r"\\s+", " ", combined).strip()
             if combined:
-                return re.sub(r"\s+", " ", combined).strip()
+                return combined
 
             descendants = loc.locator("*")
             count = await descendants.count()
@@ -763,7 +776,7 @@ async def _extract_open_popup_text(profile_page: Page) -> str:
             }
         """)
         for txt in portal_texts:
-            clean = re.sub(r"\s+", " ", txt).strip()
+            clean = re.sub(r"\\s+", " ", txt).strip()
             if len(clean) > 2:
                 return clean
     except Exception:
@@ -794,10 +807,10 @@ async def _debug_confirmed_info_area(profile_page: Page) -> None:
         pass
 
 
-async def _get_confirmed_info_icon_targets(profile_page: Page):
+async def _get_confirmed_info_box(profile_page: Page):
     label = profile_page.get_by_text("Confirmed info", exact=True).first
     if await label.count() == 0:
-        return []
+        return None
 
     candidates = [
         label.locator("xpath=following-sibling::div[1]").first,
@@ -805,132 +818,100 @@ async def _get_confirmed_info_icon_targets(profile_page: Page):
         label.locator("xpath=ancestor::div[1]/following-sibling::div[1]").first,
     ]
 
-    targets = []
-
-    for row in candidates:
+    for box in candidates:
         try:
-            if await row.count() == 0:
+            if await box.count() == 0:
                 continue
 
-            blocks = row.locator("xpath=./div")
-            block_count = await blocks.count()
-            if block_count == 0:
-                continue
+            svg_count = await box.locator("svg").count()
+            if svg_count >= 2:
+                return box
 
-            for i in range(block_count):
-                block = blocks.nth(i)
-
-                clickable_candidates = [
-                    block.locator("button").first,
-                    block.locator("[role='button']").first,
-                    block.locator("svg").last,
-                    block.locator("*").first,
-                    block,
-                ]
-
-                for cand in clickable_candidates:
-                    try:
-                        if await cand.count() == 0:
-                            continue
-                        box = await cand.bounding_box()
-                        if box and box["width"] > 0 and box["height"] > 0:
-                            targets.append(cand)
-                            break
-                    except Exception:
-                        continue
-
-            if targets:
-                return targets
-
+            descendants = box.locator("xpath=.//*")
+            desc_count = await descendants.count()
+            for i in range(min(desc_count, 12)):
+                try:
+                    child = descendants.nth(i)
+                    child_svg_count = await child.locator("svg").count()
+                    if child_svg_count >= 2:
+                        return child
+                except Exception:
+                    continue
         except Exception:
             continue
 
-    return []
+    return None
 
 
-async def _open_confirmed_info_modal(profile_page: Page, preferred_indices: list[int] | None = None) -> bool:
-    targets = await _get_confirmed_info_icon_targets(profile_page)
-    print(f"Confirmed info icon targets found: {len(targets)}", flush=True)
-
-    if not targets:
-        print("Confirmed info icon targets not found.", flush=True)
+async def _open_confirmed_info_modal(profile_page: Page) -> bool:
+    target = await _get_confirmed_info_box(profile_page)
+    if target is None:
+        print("Confirmed info box not found.", flush=True)
         return False
 
-    if preferred_indices is None:
-        preferred_indices = [3, 2, 0, 1]
+    print("Confirmed info box found.", flush=True)
 
-    ordered = [i for i in preferred_indices if 0 <= i < len(targets)]
-    ordered += [i for i in range(len(targets)) if i not in ordered]
+    try:
+        await target.scroll_into_view_if_needed()
+        await profile_page.wait_for_timeout(200)
+    except Exception:
+        pass
 
-    for i in ordered:
-        target = targets[i]
+    try:
+        await target.hover(force=True, timeout=2000)
+        await profile_page.wait_for_timeout(500)
 
-        try:
-            await target.scroll_into_view_if_needed()
-            await profile_page.wait_for_timeout(200)
-        except Exception:
-            pass
+        popup_text = await _extract_open_popup_text(profile_page)
+        if popup_text:
+            print("Confirmed info popup opened by hover on box", flush=True)
+            return True
+    except Exception as e:
+        print(f"Hover failed on confirmed info box: {e}", flush=True)
 
-        try:
-            await target.hover(force=True, timeout=2000)
+    try:
+        await target.click(force=True, timeout=2000)
+        await profile_page.wait_for_timeout(600)
+
+        popup_text = await _extract_open_popup_text(profile_page)
+        if popup_text:
+            print("Confirmed info popup opened by click on box", flush=True)
+            return True
+    except Exception as e:
+        print(f"Click failed on confirmed info box: {e}", flush=True)
+
+    try:
+        box = await target.bounding_box()
+        if box:
+            await profile_page.mouse.move(
+                box["x"] + box["width"] / 2,
+                box["y"] + box["height"] / 2
+            )
             await profile_page.wait_for_timeout(500)
+
             popup_text = await _extract_open_popup_text(profile_page)
             if popup_text:
-                print(f"Confirmed info popup opened by hover on target #{i}", flush=True)
+                print("Confirmed info popup opened by mouse move on box", flush=True)
                 return True
-        except Exception as e:
-            print(f"Hover failed on target #{i}: {e}", flush=True)
+    except Exception as e:
+        print(f"Mouse move failed on confirmed info box: {e}", flush=True)
 
-        try:
-            box = await target.bounding_box()
-            if box:
-                await profile_page.mouse.move(
-                    box["x"] + box["width"] / 2,
-                    box["y"] + box["height"] / 2
-                )
-                await profile_page.wait_for_timeout(500)
-                popup_text = await _extract_open_popup_text(profile_page)
-                if popup_text:
-                    print(f"Confirmed info popup opened by mouse move on target #{i}", flush=True)
-                    return True
-        except Exception as e:
-            print(f"Mouse move failed on target #{i}: {e}", flush=True)
+    try:
+        await target.dispatch_event("mouseenter")
+        await target.dispatch_event("mouseover")
+        await target.dispatch_event("mousemove")
+        await target.dispatch_event("mousedown")
+        await target.dispatch_event("mouseup")
+        await target.dispatch_event("click")
+        await profile_page.wait_for_timeout(400)
 
-        try:
-            await target.click(force=True, timeout=2000)
-            await profile_page.wait_for_timeout(500)
-            popup_text = await _extract_open_popup_text(profile_page)
-            if popup_text:
-                print(f"Confirmed info popup opened by click on target #{i}", flush=True)
-                return True
-        except Exception as e:
-            print(f"Click failed on target #{i}: {e}", flush=True)
+        popup_text = await _extract_open_popup_text(profile_page)
+        if popup_text:
+            print("Confirmed info popup opened by JS events on box", flush=True)
+            return True
+    except Exception as e:
+        print(f"JS event fallback failed on confirmed info box: {e}", flush=True)
 
-        try:
-            attrs = await target.evaluate("""
-                el => ({
-                    ariaLabel: el.getAttribute('aria-label') || '',
-                    title: el.getAttribute('title') || '',
-                    text: el.textContent || '',
-                    dataTip: el.getAttribute('data-tip') || '',
-                    dataTooltip: el.getAttribute('data-tooltip') || ''
-                })
-            """)
-            combined = " ".join([
-                attrs.get("ariaLabel", ""),
-                attrs.get("title", ""),
-                attrs.get("dataTip", ""),
-                attrs.get("dataTooltip", ""),
-                attrs.get("text", ""),
-            ]).strip()
-            combined = re.sub(r"\s+", " ", combined).strip()
-            if combined and combined.lower() != "confirmed info":
-                print(f"Confirmed info text pulled directly from target #{i}: {combined}", flush=True)
-                return True
-        except Exception as e:
-            print(f"Attribute read failed on target #{i}: {e}", flush=True)
-
-    print("Could not open Confirmed info popup from icon targets.", flush=True)
+    print("Could not open Confirmed info popup from box.", flush=True)
     await _debug_confirmed_info_area(profile_page)
     return False
 
@@ -1015,21 +996,12 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
         r"Location\s*[:\-]?\s*([A-Za-z0-9 ,.'/-]+)",
     ]
 
-    blocked_exact = {
-        "Editor", "Video Editor", "Channel Manager", "Creative Director",
-        "Thumbnail Designer", "Scriptwriter", "Producer", "Strategist",
-    }
-
     for pattern in patterns:
         m = re.search(pattern, flat, re.I)
         if not m:
             continue
         location = m.group(1).strip(" ,.-")
-        if not location:
-            continue
         if "Confirmed info" in location or "Why is this important" in location:
-            continue
-        if location in blocked_exact:
             continue
         return location
 
@@ -1371,117 +1343,166 @@ def build_column_values(rec: TalentRecord) -> dict:
     elif rec.open_for_work is False:
         vals[MONDAY_COLUMNS["open_for_work"]] = {"checked": False}
 
-    # optional dropdown if you still want it filled too
-    if rec.job_role and MONDAY_COLUMNS.get("job_role"):
+    if rec.job_role:
         vals[MONDAY_COLUMNS["job_role"]] = {"labels": [rec.job_role]}
 
     return vals
 
 
-async def run_scrape(max_pages: int, headless: bool, dry_run: bool, open_for_work_only: bool) -> None:
-    print(
-        f"STARTING RUN | max_pages={max_pages} | headless={headless} | "
-        f"dry_run={dry_run} | open_for_work_only={open_for_work_only}"
-    )
-
-    monday = None
-    existing_links: set[str] = set()
-
-    if not dry_run:
-        if not MONDAY_API_TOKEN:
-            raise RuntimeError("MONDAY_API_TOKEN is missing.")
-        print("Loading existing monday YTJobs profile links...")
-        monday = MondayClient(MONDAY_API_TOKEN)
-        existing_links = monday.get_existing_profile_links(
-            MONDAY_BOARD_ID,
-            MONDAY_COLUMNS["ytjobs_profile_link"],
-        )
-        print(f"Existing monday links: {len(existing_links)}")
-
-    all_records: list[TalentRecord] = []
-
+async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context()
-        page = await context.new_page()
+        ctx = await browser.new_context(viewport={"width": 1600, "height": 1200})
+        page = await ctx.new_page()
 
-        try:
-            for page_no in range(1, max_pages + 1):
-                records = await _scrape_directory_page(page, context, page_no)
+        all_records: list[TalentRecord] = []
 
-                for rec in records:
-                    if open_for_work_only and rec.open_for_work is False:
-                        continue
-                    if rec.ytjobs_profile_link in existing_links:
-                        continue
-                    all_records.append(rec)
+        for page_no in range(1, max_pages + 1):
+            try:
+                records = await _scrape_directory_page(page, ctx, page_no)
+            except Exception as e:
+                print(f"Failed scraping page {page_no}: {e}")
+                continue
 
-            print(f"TOTAL NEW RECORDS: {len(all_records)}")
+            if not records:
+                print(f"No valid records found on page {page_no}; continuing.")
+                continue
 
-            if dry_run:
-                for rec in all_records:
-                    print(json.dumps({
-                        "name": rec.name,
-                        "ytjobs_profile_link": rec.ytjobs_profile_link,
-                        "linkedin": rec.linkedin,
-                        "email": rec.email,
-                        "years_of_experience": rec.years_of_experience,
-                        "open_for_work": rec.open_for_work,
-                        "creators_worked_with": rec.creators_worked_with,
-                        "views": rec.views,
-                        "job_role": rec.job_role,
-                        "niche": rec.niche,
-                        "location": rec.location,
-                        "twitter_handle": rec.twitter_handle,
-                        "youtube": rec.youtube,
-                    }, ensure_ascii=False))
-                return
+            all_records.extend(records)
+            await page.wait_for_timeout(400)
 
-            assert monday is not None
+        await browser.close()
 
-            for rec in all_records:
-                group_id = ROLE_TO_GROUP_ID.get(rec.job_role or "", ROLE_TO_GROUP_ID["Other"])
-                item_name = rec.name.strip() or "Unknown Talent"
-                column_values = build_column_values(rec)
+    dedup: dict[str, TalentRecord] = {}
+    for rec in all_records:
+        if rec.ytjobs_profile_link:
+            dedup[_normalize_profile_link(rec.ytjobs_profile_link)] = rec
 
-                try:
-                    monday.create_item(
-                        board_id=MONDAY_BOARD_ID,
-                        group_id=group_id,
-                        item_name=item_name,
-                        column_values=column_values,
-                    )
-                    print(f"Created Monday item: {item_name} -> {group_id}")
-                except Exception as e:
-                    print(f"Failed creating Monday item for {item_name}: {e}")
-
-        finally:
-            await context.close()
-            await browser.close()
+    return list(dedup.values())
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--max-pages", type=int, default=1)
-    parser.add_argument("--headless", type=str, default="true")
-    parser.add_argument("--dry-run", type=str, default="false")
-    parser.add_argument("--open-for-work-only", type=str, default="false")
+    env_max_pages = int(os.getenv("MAX_PAGES", "10"))
+    env_headless = os.getenv("HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
+    env_dry_run = os.getenv("DRY_RUN", "false").strip().lower() in {"1", "true", "yes"}
+    env_open_for_work_only = os.getenv("OPEN_FOR_WORK_ONLY", "false").strip().lower() in {"1", "true", "yes"}
+
+    parser = argparse.ArgumentParser(description="Scrape YTJobs talent and sync to monday.com")
+    parser.add_argument("--max-pages", type=int, default=env_max_pages)
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=env_headless)
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=env_dry_run)
+    parser.add_argument(
+        "--open-for-work-only",
+        action=argparse.BooleanOptionalAction,
+        default=env_open_for_work_only,
+        help="Only create monday leads for profiles explicitly marked open for work.",
+    )
     return parser.parse_args()
 
 
-def _to_bool(value: str | bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+def main() -> None:
+    args = parse_args()
+
+    print(
+        f"STARTING RUN | max_pages={args.max_pages} | headless={args.headless} | "
+        f"dry_run={args.dry_run} | open_for_work_only={args.open_for_work_only}",
+        flush=True,
+    )
+
+    if not MONDAY_API_TOKEN and not args.dry_run:
+        raise RuntimeError("MONDAY_API_TOKEN is required unless --dry-run is enabled")
+
+    monday = MondayClient(MONDAY_API_TOKEN) if MONDAY_API_TOKEN else None
+    existing = set()
+
+    if monday:
+        print("Loading existing monday YTJobs profile links...", flush=True)
+        existing = monday.get_existing_profile_links(MONDAY_BOARD_ID, MONDAY_COLUMNS["ytjobs_profile_link"])
+        print(f"Existing monday links: {len(existing)}", flush=True)
+
+    records = asyncio.run(scrape(args.max_pages, args.headless))
+    print(f"Total scraped valid records: {len(records)}")
+
+    if args.dry_run:
+        for rec in records[:50]:
+            print(json.dumps(asdict(rec), ensure_ascii=False))
+        print("Dry run mode enabled; no monday updates sent.")
+        return
+
+    created = 0
+    skipped_existing = 0
+    skipped_not_open_for_work = 0
+    skipped_unmapped = 0
+    failed = 0
+
+    created_local_keys: set[str] = set()
+
+    for idx, rec in enumerate(records, start=1):
+        normalized_link = _normalize_profile_link(rec.ytjobs_profile_link)
+        local_key = normalized_link
+
+        if local_key in created_local_keys:
+            skipped_existing += 1
+            continue
+
+        if normalized_link in existing:
+            skipped_existing += 1
+            print(f"[{idx}] Skipping existing monday item: {rec.name} | {normalized_link}")
+            continue
+
+        if args.open_for_work_only and rec.open_for_work is not True:
+            skipped_not_open_for_work += 1
+            print(f"[{idx}] Skipping not-open-for-work: {rec.name} | open_for_work={rec.open_for_work}")
+            continue
+
+        group_id = ROLE_TO_GROUP_ID.get(rec.job_role or "")
+        if not group_id:
+            skipped_unmapped += 1
+            print(f"[{idx}] Skipping because role is not mapped to a monday group: {rec.name} | role={rec.job_role}")
+            continue
+
+        values = build_column_values(rec)
+
+        print(
+            f"[{idx}] Creating: {rec.name} | role={rec.job_role} | group={group_id} | "
+            f"open_for_work={rec.open_for_work} | niche={rec.niche} | views={rec.views} | "
+            f"email={rec.email} | location={rec.location} | creators={rec.creators_worked_with} | "
+            f"social={_pick_primary_social_text(rec)}"
+        )
+        print("MONDAY COLUMN VALUES:", json.dumps(values, ensure_ascii=False))
+
+        try:
+            monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
+            created_local_keys.add(local_key)
+            existing.add(normalized_link)
+            created += 1
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[{idx}] First attempt failed for {rec.name}: {e}")
+            time.sleep(2)
+            try:
+                monday.create_item(MONDAY_BOARD_ID, group_id, rec.name, values)
+                created_local_keys.add(local_key)
+                existing.add(normalized_link)
+                created += 1
+                time.sleep(0.2)
+            except Exception as e2:
+                failed += 1
+                print(f"[{idx}] Failed permanently for {rec.name}: {e2}")
+
+    print("========== FINAL SUMMARY ==========")
+    print(f"Total scraped valid records: {len(records)}")
+    print(f"Created monday items: {created}")
+    print(f"Skipped existing: {skipped_existing}")
+    print(f"Skipped not open for work: {skipped_not_open_for_work}")
+    print(f"Skipped unmapped role: {skipped_unmapped}")
+    print(f"Failed: {failed}")
+
+    if len(records) > 0:
+        processed = created + skipped_existing + skipped_not_open_for_work + skipped_unmapped + failed
+        print(f"Processed rate: {(processed / len(records)):.1%}")
+        print(f"Create success rate: {(created / len(records)):.1%}")
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    asyncio.run(
-        run_scrape(
-            max_pages=args.max_pages,
-            headless=_to_bool(args.headless),
-            dry_run=_to_bool(args.dry_run),
-            open_for_work_only=_to_bool(args.open_for_work_only),
-        )
-    )
+    main()
