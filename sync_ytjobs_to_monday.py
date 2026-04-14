@@ -541,7 +541,7 @@ async def _wait_for_profile_ready(profile_page: Page) -> None:
         except Exception:
             continue
 
-    await profile_page.wait_for_timeout(1500)
+    await profile_page.wait_for_timeout(1200)
 
 
 async def _get_visible_cards(page: Page) -> list[dict]:
@@ -629,18 +629,6 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
     return combined_text, html
 
 
-def _looks_like_confirmed_info_text(text: str) -> bool:
-    if not text:
-        return False
-    lowered = text.lower()
-    return (
-        "why is this important" in lowered
-        or "location is verified via browser api" in lowered
-        or "browser api" in lowered
-        or ("public" in lowered and "location" in lowered)
-    )
-
-
 async def _extract_open_popup_text(profile_page: Page) -> str:
     popup_locators = [
         profile_page.locator('[role="dialog"]:visible').last,
@@ -649,6 +637,7 @@ async def _extract_open_popup_text(profile_page: Page) -> str:
         profile_page.locator('[data-state="open"]:visible').last,
         profile_page.locator('.popover:visible').last,
         profile_page.locator('.modal:visible').last,
+        profile_page.locator('[data-testid="gray-popup-section"]:visible').last,
     ]
 
     for loc in popup_locators:
@@ -656,7 +645,7 @@ async def _extract_open_popup_text(profile_page: Page) -> str:
             if await loc.count() == 0:
                 continue
             txt = await loc.inner_text(timeout=1500)
-            if txt and _looks_like_confirmed_info_text(txt):
+            if txt and txt.strip():
                 return txt
         except Exception:
             continue
@@ -679,7 +668,7 @@ async def _debug_confirmed_info_area(profile_page: Page) -> None:
 
     try:
         openish_count = await profile_page.locator(
-            '[data-state="open"], [aria-modal="true"], [role="tooltip"], .modal, .popover'
+            '[data-state="open"], [aria-modal="true"], [role="tooltip"], .modal, .popover, [data-testid="gray-popup-section"]'
         ).count()
         print("OPENISH COUNT:", openish_count, flush=True)
     except Exception:
@@ -706,8 +695,6 @@ async def _get_confirmed_info_icon_blocks(profile_page: Page):
     if await label.count() == 0:
         return None
 
-    # Based on the HTML the user inspected:
-    # Confirmed info label -> following sibling div -> child div blocks
     candidates = [
         label.locator("xpath=following-sibling::div[1]").first,
         label.locator("xpath=../following-sibling::div[1]").first,
@@ -718,7 +705,6 @@ async def _get_confirmed_info_icon_blocks(profile_page: Page):
         try:
             if await row.count() == 0:
                 continue
-
             direct_blocks = row.locator("xpath=./div")
             count = await direct_blocks.count()
             if count >= 1:
@@ -735,18 +721,13 @@ async def _open_confirmed_info_modal(profile_page: Page, preferred_indices: list
         print("Confirmed info icon row not found.", flush=True)
         return False
 
-    try:
-        count = await icon_blocks.count()
-    except Exception:
-        count = 0
-
+    count = await icon_blocks.count()
     print(f"Confirmed info icon blocks found: {count}", flush=True)
-
     if count == 0:
         return False
 
     if preferred_indices is None:
-        preferred_indices = [3, 2, 0, 1]  # location, twitter, email, youtube
+        preferred_indices = [3, 2, 0, 1]
 
     ordered_indices = [i for i in preferred_indices if 0 <= i < count]
     remaining = [i for i in range(count) if i not in ordered_indices]
@@ -760,28 +741,55 @@ async def _open_confirmed_info_modal(profile_page: Page, preferred_indices: list
         except Exception:
             pass
 
-        # hover first
         try:
-            await target.hover()
-            await profile_page.wait_for_timeout(300)
+            await target.dispatch_event("mouseenter")
+            await target.dispatch_event("mouseover")
+            await target.dispatch_event("mousemove")
+            await profile_page.wait_for_timeout(250)
+
             popup_text = await _extract_open_popup_text(profile_page)
             if popup_text:
-                print(f"Confirmed info popup opened by hover on icon block #{i}", flush=True)
+                print(f"Confirmed info popup opened by JS hover on icon block #{i}", flush=True)
                 return True
         except Exception as e:
-            print(f"Hover failed on icon block #{i}: {e}", flush=True)
+            print(f"JS hover failed on icon block #{i}: {e}", flush=True)
 
-        # then click
         try:
-            clicked = await _click_locator_best_effort(target)
-            if clicked:
-                await profile_page.wait_for_timeout(500)
-                popup_text = await _extract_open_popup_text(profile_page)
-                if popup_text:
-                    print(f"Confirmed info popup opened by click on icon block #{i}", flush=True)
-                    return True
+            await target.evaluate("""
+                (el) => {
+                    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+                    el.click();
+                }
+            """)
+            await profile_page.wait_for_timeout(350)
+
+            popup_text = await _extract_open_popup_text(profile_page)
+            if popup_text:
+                print(f"Confirmed info popup opened by JS click on icon block #{i}", flush=True)
+                return True
         except Exception as e:
-            print(f"Click failed on icon block #{i}: {e}", flush=True)
+            print(f"JS click failed on icon block #{i}: {e}", flush=True)
+
+        try:
+            inner_icon = target.locator("svg").nth(1)
+            await inner_icon.evaluate("""
+                (el) => {
+                    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+                    el.click();
+                }
+            """)
+            await profile_page.wait_for_timeout(350)
+
+            popup_text = await _extract_open_popup_text(profile_page)
+            if popup_text:
+                print(f"Confirmed info popup opened by inner svg JS click on icon block #{i}", flush=True)
+                return True
+        except Exception as e:
+            print(f"Inner svg JS click failed on icon block #{i}: {e}", flush=True)
 
     print("Could not open Confirmed info popup from icon blocks.", flush=True)
     await _debug_confirmed_info_area(profile_page)
@@ -979,7 +987,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print(f"Opening profile: {card['name']} | {profile_url}")
         await profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
         await _wait_for_profile_ready(profile_page)
-        await profile_page.wait_for_timeout(1200)
+        await profile_page.wait_for_timeout(1000)
 
         combined_text, html = await _collect_profile_text(profile_page)
         confirmed_modal_text = await _extract_confirmed_info_modal_text(profile_page)
@@ -1054,9 +1062,9 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
     print(f"Scraping directory page {page_no}: {url}")
 
     await page.goto(url, wait_until="networkidle", timeout=90000)
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(2500)
     await _accept_cookies(page)
-    await page.wait_for_timeout(1200)
+    await page.wait_for_timeout(800)
 
     title = await page.title()
     body_preview = await page.locator("body").inner_text()
@@ -1090,7 +1098,7 @@ async def _scrape_directory_page(page: Page, context, page_no: int) -> list[Tale
 
         seen_record_keys.add(dedupe_key)
         records.append(rec)
-        await page.wait_for_timeout(300)
+        await page.wait_for_timeout(250)
 
     print(f"Directory page {page_no} valid records found: {len(records)}")
     return records
@@ -1239,7 +1247,7 @@ async def scrape(max_pages: int, headless: bool) -> list[TalentRecord]:
                 continue
 
             all_records.extend(records)
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(400)
 
         await browser.close()
 
