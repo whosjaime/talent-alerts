@@ -818,25 +818,32 @@ async def _get_confirmed_info_box(profile_page: Page):
         label.locator("xpath=ancestor::div[1]/following-sibling::div[1]").first,
     ]
 
-    for box in candidates:
+    for row in candidates:
         try:
-            if await box.count() == 0:
+            if await row.count() == 0:
                 continue
 
-            svg_count = await box.locator("svg").count()
-            if svg_count >= 2:
-                return box
-
-            descendants = box.locator("xpath=.//*")
-            desc_count = await descendants.count()
-            for i in range(min(desc_count, 12)):
+            # first try direct children that contain svg icons
+            children = row.locator("xpath=./div")
+            child_count = await children.count()
+            for i in range(child_count):
+                child = children.nth(i)
                 try:
-                    child = descendants.nth(i)
-                    child_svg_count = await child.locator("svg").count()
-                    if child_svg_count >= 2:
+                    svg_count = await child.locator("svg").count()
+                    box = await child.bounding_box()
+                    if svg_count >= 2 and box and box["width"] > 40 and box["height"] > 20:
                         return child
                 except Exception:
                     continue
+
+            # fallback: any descendant div with svg icons
+            clickable = row.locator("div").filter(has=row.locator("svg")).first
+            if await clickable.count() > 0:
+                return clickable
+
+            # last fallback
+            return row
+
         except Exception:
             continue
 
@@ -857,8 +864,25 @@ async def _open_confirmed_info_modal(profile_page: Page) -> bool:
     except Exception:
         pass
 
+    # real click first - no force
     try:
-        await target.hover(force=True, timeout=2000)
+        await target.click(timeout=2000)
+        await profile_page.wait_for_timeout(700)
+
+        popup_text = await _extract_open_popup_text(profile_page)
+        if popup_text:
+            print("Confirmed info popup opened by click on box", flush=True)
+            return True
+
+        dialog_count = await profile_page.locator('[role="dialog"]:visible').count()
+        if dialog_count > 0:
+            print("Confirmed info dialog opened by click on box", flush=True)
+            return True
+    except Exception as e:
+        print(f"Click failed on confirmed info box: {e}", flush=True)
+
+    try:
+        await target.hover(timeout=2000)
         await profile_page.wait_for_timeout(500)
 
         popup_text = await _extract_open_popup_text(profile_page)
@@ -869,44 +893,35 @@ async def _open_confirmed_info_modal(profile_page: Page) -> bool:
         print(f"Hover failed on confirmed info box: {e}", flush=True)
 
     try:
-        await target.click(force=True, timeout=2000)
-        await profile_page.wait_for_timeout(600)
-
-        popup_text = await _extract_open_popup_text(profile_page)
-        if popup_text:
-            print("Confirmed info popup opened by click on box", flush=True)
-            return True
-    except Exception as e:
-        print(f"Click failed on confirmed info box: {e}", flush=True)
-
-    try:
         box = await target.bounding_box()
         if box:
             await profile_page.mouse.move(
                 box["x"] + box["width"] / 2,
                 box["y"] + box["height"] / 2
             )
-            await profile_page.wait_for_timeout(500)
+            await profile_page.mouse.down()
+            await profile_page.mouse.up()
+            await profile_page.wait_for_timeout(700)
 
             popup_text = await _extract_open_popup_text(profile_page)
             if popup_text:
-                print("Confirmed info popup opened by mouse move on box", flush=True)
+                print("Confirmed info popup opened by mouse click on box", flush=True)
+                return True
+
+            dialog_count = await profile_page.locator('[role="dialog"]:visible').count()
+            if dialog_count > 0:
+                print("Confirmed info dialog opened by mouse click on box", flush=True)
                 return True
     except Exception as e:
         print(f"Mouse move failed on confirmed info box: {e}", flush=True)
 
     try:
-        await target.dispatch_event("mouseenter")
-        await target.dispatch_event("mouseover")
-        await target.dispatch_event("mousemove")
-        await target.dispatch_event("mousedown")
-        await target.dispatch_event("mouseup")
         await target.dispatch_event("click")
-        await profile_page.wait_for_timeout(400)
+        await profile_page.wait_for_timeout(500)
 
         popup_text = await _extract_open_popup_text(profile_page)
         if popup_text:
-            print("Confirmed info popup opened by JS events on box", flush=True)
+            print("Confirmed info popup opened by JS click on box", flush=True)
             return True
     except Exception as e:
         print(f"JS event fallback failed on confirmed info box: {e}", flush=True)
@@ -953,6 +968,16 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
         return ""
 
     try:
+        dialog = profile_page.locator('[role="dialog"]:visible').last
+        if await dialog.count() > 0:
+            try:
+                txt = (await dialog.inner_text(timeout=1500)).strip()
+                if txt:
+                    print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
+                    return txt
+            except Exception:
+                pass
+
         txt = await _extract_open_popup_text(profile_page)
         if txt:
             print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
@@ -970,7 +995,9 @@ def _extract_socials_from_confirmed_modal(modal_text: str) -> str:
 
     patterns = [
         r"Public\s+@([A-Za-z0-9_]{2,15})\b",
+        r"(?:twitter|x)\s*(?:Public)?\s*@([A-Za-z0-9_]{2,15})\b",
         r"(?:twitter|x|discord)\s*[:\-]?\s*@([A-Za-z0-9_]{2,15})\b",
+        r"@([A-Za-z0-9_]{2,15})\b",
     ]
 
     for pattern in patterns:
@@ -992,8 +1019,10 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
     flat = re.sub(r"\s+", " ", modal_text).strip()
 
     patterns = [
-        r"Public\s+(.+?)\s+Talent[’'`]?s location is verified via browser API",
+        r"Public\s+([A-Za-z .'-]+,\s*[A-Za-z .'-]+)\s+Talent[’'`]?s location is verified via browser API",
         r"Location\s*[:\-]?\s*([A-Za-z0-9 ,.'/-]+)",
+        r"Public\s+([A-Za-z0-9 .,'/-]+)\s+Talent[’'`]?s location",
+        r"([A-Za-z .'-]+,\s*[A-Za-z .'-]+)\s+Talent[’'`]?s location is verified",
     ]
 
     for pattern in patterns:
