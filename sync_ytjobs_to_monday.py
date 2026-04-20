@@ -185,6 +185,15 @@ GENERIC_CREATOR_WORDS = {
     "videos", "likes", "profile", "clients", "timeline", "posts", "see more",
 }
 
+BAD_LOCATION_VALUES = {
+    "Editor", "Creative Director", "Producer", "Strategist",
+    "Thumbnail Designer", "Channel Manager", "Video Editor",
+    "Long-Form Editor", "Short-Form Editor", "Scriptwriter",
+    "Animator", "Other", "Present", "Profile", "Portfolio",
+    "Clients", "Timeline", "Posts", "Links", "Confirmed info",
+    "Experience", "Language skills", "Categories"
+}
+
 
 @dataclass
 class TalentRecord:
@@ -453,6 +462,10 @@ def _extract_niche(text: str) -> str:
         if score:
             keyword_scores[niche] = score
 
+    for niche, _ in sorted(keyword_scores.items(), key=lambda x: x[1]),:
+        pass
+    # fixed below
+
     for niche, _ in sorted(keyword_scores.items(), key=lambda x: x[1], reverse=True):
         if niche in allowed and niche not in found:
             found.append(niche)
@@ -464,14 +477,25 @@ def _extract_years_of_experience(text: str) -> float | None:
     if not text:
         return None
 
+    clean = re.sub(r"\s+", " ", text)
+
     patterns = [
-        r"(\d+(?:\.\d+)?)\s*\+?\s*years(?:\s+of\s+experience)?",
-        r"experience\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*\+?\s*years",
+        r"\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*years(?:\s+of\s+experience)?\b",
+        r"\bexperience\s*[:\-]?\s*(\d{1,2}(?:\.\d+)?)\s*\+?\s*years\b",
+        r"\bover\s+(\d{1,2})\s+years\b",
+        r"\bmore than\s+(\d{1,2})\s+years\b",
     ]
+
     for pattern in patterns:
-        m = re.search(pattern, text, re.I)
-        if m:
-            return _extract_num(m.group(1))
+        m = re.search(pattern, clean, re.I)
+        if not m:
+            continue
+        years = _extract_num(m.group(1))
+        if years is None:
+            continue
+        if 0 <= years <= 50:
+            return years
+
     return None
 
 
@@ -506,6 +530,21 @@ def _looks_like_creator_name(value: str) -> bool:
     return True
 
 
+def _clean_location_candidate(location: str) -> str:
+    location = re.sub(r"\s+", " ", location or "").strip(" ,.-")
+    if not location:
+        return ""
+    if location in BAD_LOCATION_VALUES:
+        return ""
+    if len(location) < 3 or len(location) > 80:
+        return ""
+    if re.search(r"\b(Talent|verified|browser API|Twitter API|verification link)\b", location, re.I):
+        return ""
+    if re.fullmatch(r"[A-Za-z ]*Editor[A-Za-z ]*", location):
+        return ""
+    return location
+
+
 def _extract_location_from_page_text(text: str) -> str:
     if not text:
         return ""
@@ -513,25 +552,9 @@ def _extract_location_from_page_text(text: str) -> str:
     clean = re.sub(r"\s+", " ", text).strip()
 
     patterns = [
-        r"\bLocation\s*:\s*([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
-        r"\bbased in\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
-        r"\bfrom\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+){0,2})\b",
-    ]
-
-    blocked_exact = {
-        "Our Childhood",
-        "Dying",
-    }
-
-    blocked_contains = [
-        "working with",
-        "attention to detail",
-        "turn overs",
-        "scratch",
-        "let",
-        "package",
-        "world’s biggest",
-        "world's biggest",
+        r"\bLocation\s*:\s*([A-Z][A-Za-zÀ-ÿ'.-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'.-]+)*(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'.-]+)*){0,2})\b",
+        r"\bbased in\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'.-]+)*(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'.-]+)*){0,2})\b",
+        r"\bfrom\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'.-]+)*(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'.-]+)*){0,2})\b",
     ]
 
     for pattern in patterns:
@@ -539,16 +562,9 @@ def _extract_location_from_page_text(text: str) -> str:
         if not m:
             continue
 
-        location = m.group(1).strip(" ,.-")
-
-        if len(location) < 3 or len(location) > 40:
-            continue
-        if location in blocked_exact:
-            continue
-        if any(x.lower() in location.lower() for x in blocked_contains):
-            continue
-
-        return location
+        location = _clean_location_candidate(m.group(1))
+        if location:
+            return location
 
     return ""
 
@@ -579,6 +595,7 @@ async def _wait_for_profile_ready(profile_page: Page) -> None:
         profile_page.get_by_text("Portfolio", exact=True).first,
         profile_page.get_by_text("Experience", exact=True).first,
         profile_page.get_by_text("Hire Me", exact=True).first,
+        profile_page.get_by_text("Confirmed info", exact=True).first,
     ]
 
     for locator in anchors:
@@ -678,9 +695,13 @@ async def _collect_profile_text(profile_page: Page) -> tuple[str, str]:
 
 async def _extract_open_popup_text(profile_page: Page) -> str:
     popup_locators = [
-        profile_page.locator('[data-testid="gray-popup-section"]:visible').last,
         profile_page.locator('[role="dialog"]:visible').last,
         profile_page.locator('[aria-modal="true"]:visible').last,
+        profile_page.locator('text="Why is this important?"').locator("xpath=ancestor::*[1]").first,
+        profile_page.locator('text=/Talent.?s location is verified via browser API\\./i').locator("xpath=ancestor::*[1]").first,
+        profile_page.locator('text=/Talent.?s personal Twitter account is verified via Twitter API\\./i').locator("xpath=ancestor::*[1]").first,
+        profile_page.locator('text=/Talent.?s email address is verified via a verification link\\./i').locator("xpath=ancestor::*[1]").first,
+        profile_page.locator('[data-testid="gray-popup-section"]:visible').last,
         profile_page.locator('[role="tooltip"]:visible').last,
         profile_page.locator('[data-state="open"]:visible').last,
         profile_page.locator('.popover:visible').last,
@@ -692,93 +713,21 @@ async def _extract_open_popup_text(profile_page: Page) -> str:
             if await loc.count() == 0:
                 continue
 
-            txt = (await loc.inner_text(timeout=1000)).strip()
-            if txt:
+            txt = (await loc.inner_text(timeout=1500)).strip()
+            if txt and len(txt) > 20:
                 return txt
-
-            attrs = await loc.evaluate("""
-                el => ({
-                    ariaLabel: el.getAttribute('aria-label') || '',
-                    title: el.getAttribute('title') || '',
-                    dataTip: el.getAttribute('data-tip') || '',
-                    dataTooltip: el.getAttribute('data-tooltip') || '',
-                    text: el.textContent || ''
-                })
-            """)
-            combined = " ".join([
-                attrs.get("ariaLabel", ""),
-                attrs.get("title", ""),
-                attrs.get("dataTip", ""),
-                attrs.get("dataTooltip", ""),
-                attrs.get("text", ""),
-            ]).strip()
-            combined = re.sub(r"\\s+", " ", combined).strip()
-            if combined:
-                return combined
-
-            descendants = loc.locator("*")
-            count = await descendants.count()
-            for i in range(min(count, 25)):
-                try:
-                    sub = descendants.nth(i)
-                    subtxt = (await sub.inner_text(timeout=300)).strip()
-                    if subtxt and len(subtxt) > 2:
-                        return subtxt
-                except Exception:
-                    continue
-
-            html = await loc.inner_html(timeout=1000)
-            print("GRAY POPUP HTML:", html[:2000], flush=True)
-
         except Exception:
             continue
 
     try:
-        portal_texts = await profile_page.evaluate("""
-            () => {
-                const selectors = [
-                    '[role="tooltip"]',
-                    '[data-testid="gray-popup-section"]',
-                    '[data-state="open"]',
-                    '[aria-live]',
-                    '.popover',
-                    '.tooltip',
-                    '.modal'
-                ];
-
-                const out = [];
-                for (const sel of selectors) {
-                    for (const el of document.querySelectorAll(sel)) {
-                        const style = window.getComputedStyle(el);
-                        const rect = el.getBoundingClientRect();
-                        const visible =
-                            style &&
-                            style.display !== 'none' &&
-                            style.visibility !== 'hidden' &&
-                            rect.width > 0 &&
-                            rect.height > 0;
-
-                        if (!visible) continue;
-
-                        const raw = [
-                            el.innerText || '',
-                            el.textContent || '',
-                            el.getAttribute('aria-label') || '',
-                            el.getAttribute('title') || '',
-                            el.getAttribute('data-tip') || '',
-                            el.getAttribute('data-tooltip') || ''
-                        ].join(' ').trim();
-
-                        if (raw) out.push(raw);
-                    }
-                }
-                return out;
-            }
-        """)
-        for txt in portal_texts:
-            clean = re.sub(r"\\s+", " ", txt).strip()
-            if len(clean) > 2:
-                return clean
+        body_text = await profile_page.locator("body").inner_text(timeout=2000)
+        m = re.search(
+            r"Confirmed info(.*?Why is this important\?.*?)$",
+            body_text,
+            re.I | re.S,
+        )
+        if m:
+            return m.group(0).strip()
     except Exception:
         pass
 
@@ -788,7 +737,7 @@ async def _extract_open_popup_text(profile_page: Page) -> str:
 async def _debug_confirmed_info_area(profile_page: Page) -> None:
     try:
         body_text = await profile_page.locator("body").inner_text(timeout=2000)
-        print("BODY AFTER CLICK PREVIEW:", repr(body_text[:1500]), flush=True)
+        print("BODY AFTER CLICK PREVIEW:", repr(body_text[:2500]), flush=True)
     except Exception:
         pass
 
@@ -806,11 +755,16 @@ async def _debug_confirmed_info_area(profile_page: Page) -> None:
     except Exception:
         pass
 
+    try:
+        section_text = await profile_page.locator("body").inner_text(timeout=2000)
+        m = re.search(r"Confirmed info(.*?)(Experience|Links|Language skills|Categories|Why is this important\?)", section_text, re.I | re.S)
+        if m:
+            print("CONFIRMED INFO SECTION AFTER CLICK:", repr(m.group(1)[:1500]), flush=True)
+    except Exception:
+        pass
+
 
 async def _get_confirmed_info_box(profile_page: Page):
-    """
-    Find the full clickable Confirmed info card, not one of the tiny inner icons.
-    """
     label = profile_page.get_by_text("Confirmed info", exact=True).first
     if await label.count() == 0:
         return None
@@ -818,12 +772,8 @@ async def _get_confirmed_info_box(profile_page: Page):
     candidates = [
         label.locator("xpath=following-sibling::*[1]").first,
         label.locator("xpath=../following-sibling::*[1]").first,
-        label.locator("xpath=ancestor::*[self::div or self::section][1]/following-sibling::*[1]").first,
-        label.locator("xpath=following::*[.//*[name()='svg']][1]").first,
+        label.locator("xpath=ancestor::div[1]/following-sibling::*[1]").first,
     ]
-
-    best = None
-    best_score = -1
 
     for candidate in candidates:
         try:
@@ -831,65 +781,30 @@ async def _get_confirmed_info_box(profile_page: Page):
                 continue
 
             box = await candidate.bounding_box()
-            if not box:
-                continue
+            if box and box["width"] >= 120 and box["height"] >= 20:
+                svg_count = await candidate.locator("svg").count()
+                if svg_count >= 3:
+                    return candidate
 
-            if box["width"] < 80 or box["height"] < 20:
-                continue
-
-            svg_count = await candidate.locator("svg").count()
-            text = (await candidate.inner_text(timeout=1000)).strip()
-
-            score = 0
-            score += min(svg_count, 10) * 10
-            score += min(int(box["width"]), 400)
-            score += min(int(box["height"]) * 5, 200)
-
-            # Prefer the actual icon row/card under Confirmed info
-            if svg_count >= 3:
-                score += 100
-            if "experience" in text.lower():
-                score -= 200
-
-            if score > best_score:
-                best = candidate
-                best_score = score
-
-            # Also inspect children in case parent is too big and child is the clickable card
             children = candidate.locator("xpath=.//*")
             child_count = await children.count()
-            for i in range(min(child_count, 25)):
+
+            for i in range(min(child_count, 30)):
                 child = children.nth(i)
                 try:
                     child_box = await child.bounding_box()
-                    if not child_box:
-                        continue
-                    if child_box["width"] < 80 or child_box["height"] < 20:
+                    if not child_box or child_box["width"] < 120 or child_box["height"] < 20:
                         continue
 
                     child_svg_count = await child.locator("svg").count()
-                    if child_svg_count < 3:
-                        continue
-
-                    child_text = (await child.inner_text(timeout=500)).strip()
-                    child_score = 0
-                    child_score += min(child_svg_count, 10) * 10
-                    child_score += min(int(child_box["width"]), 400)
-                    child_score += min(int(child_box["height"]) * 5, 200)
-
-                    if "experience" in child_text.lower():
-                        child_score -= 200
-
-                    if child_score > best_score:
-                        best = child
-                        best_score = child_score
+                    if child_svg_count >= 3:
+                        return child
                 except Exception:
                     continue
-
         except Exception:
             continue
 
-    return best
+    return None
 
 
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
@@ -902,75 +817,65 @@ async def _open_confirmed_info_modal(profile_page: Page) -> bool:
 
     try:
         await target.scroll_into_view_if_needed()
-        await profile_page.wait_for_timeout(300)
+        await profile_page.wait_for_timeout(400)
     except Exception:
         pass
 
-    # Try direct click on the whole card
-    try:
-        await target.click(timeout=2500)
-        await profile_page.wait_for_timeout(900)
+    click_attempts = []
 
-        popup_text = await _extract_open_popup_text(profile_page)
-        if popup_text:
-            print("Confirmed info popup opened by click on full card", flush=True)
-            return True
-
-        dialog_count = await profile_page.locator('[role="dialog"]:visible').count()
-        if dialog_count > 0:
-            print("Confirmed info dialog opened by click on full card", flush=True)
-            return True
-    except Exception as e:
-        print(f"Click failed on confirmed info box: {e}", flush=True)
-
-    # Try clicking center of the card via mouse
     try:
         box = await target.bounding_box()
         if box:
-            await profile_page.mouse.click(
-                box["x"] + box["width"] / 2,
-                box["y"] + box["height"] / 2,
-            )
-            await profile_page.wait_for_timeout(900)
+            click_attempts.append(("center", box["x"] + box["width"] / 2, box["y"] + box["height"] / 2))
+            click_attempts.append(("left-center", box["x"] + 20, box["y"] + box["height"] / 2))
+            click_attempts.append(("right-center", box["x"] + box["width"] - 20, box["y"] + box["height"] / 2))
+    except Exception:
+        pass
+
+    try:
+        await target.click(timeout=2500)
+        await profile_page.wait_for_timeout(1000)
+        popup_text = await _extract_open_popup_text(profile_page)
+        if popup_text:
+            print("Confirmed info popup opened via normal click.", flush=True)
+            return True
+    except Exception as e:
+        print(f"Normal click failed: {e}", flush=True)
+
+    for label, x, y in click_attempts:
+        try:
+            await profile_page.mouse.click(x, y)
+            await profile_page.wait_for_timeout(1000)
 
             popup_text = await _extract_open_popup_text(profile_page)
             if popup_text:
-                print("Confirmed info popup opened by mouse center click", flush=True)
+                print(f"Confirmed info popup opened via mouse {label} click.", flush=True)
                 return True
+        except Exception as e:
+            print(f"Mouse {label} click failed: {e}", flush=True)
 
-            dialog_count = await profile_page.locator('[role="dialog"]:visible').count()
-            if dialog_count > 0:
-                print("Confirmed info dialog opened by mouse center click", flush=True)
-                return True
-    except Exception as e:
-        print(f"Mouse center click failed on confirmed info box: {e}", flush=True)
-
-    # Try JS click as fallback
     try:
         await target.evaluate("(el) => el.click()")
-        await profile_page.wait_for_timeout(700)
-
+        await profile_page.wait_for_timeout(1000)
         popup_text = await _extract_open_popup_text(profile_page)
         if popup_text:
-            print("Confirmed info popup opened by JS click", flush=True)
+            print("Confirmed info popup opened via JS click.", flush=True)
             return True
     except Exception as e:
-        print(f"JS event fallback failed on confirmed info box: {e}", flush=True)
+        print(f"JS click failed: {e}", flush=True)
 
-    # Last fallback: try Enter/Space after focusing
     try:
         await target.focus()
         await profile_page.keyboard.press("Enter")
-        await profile_page.wait_for_timeout(700)
-
+        await profile_page.wait_for_timeout(1000)
         popup_text = await _extract_open_popup_text(profile_page)
         if popup_text:
-            print("Confirmed info popup opened by Enter key", flush=True)
+            print("Confirmed info popup opened via Enter.", flush=True)
             return True
     except Exception as e:
-        print(f"Keyboard fallback failed on confirmed info box: {e}", flush=True)
+        print(f"Enter key failed: {e}", flush=True)
 
-    print("Could not open Confirmed info popup from full box.", flush=True)
+    print("Could not open Confirmed info popup.", flush=True)
     await _debug_confirmed_info_area(profile_page)
     return False
 
@@ -1017,15 +922,16 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
             try:
                 txt = (await dialog.inner_text(timeout=1500)).strip()
                 if txt:
-                    print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
+                    print("CONFIRMED INFO MODAL TEXT:", repr(txt[:1000]), flush=True)
                     return txt
             except Exception:
                 pass
 
         txt = await _extract_open_popup_text(profile_page)
         if txt:
-            print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
+            print("CONFIRMED INFO MODAL TEXT:", repr(txt[:1000]), flush=True)
             return txt
+
         return ""
     finally:
         await _close_modal_if_open(profile_page)
@@ -1063,10 +969,9 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
     flat = re.sub(r"\s+", " ", modal_text).strip()
 
     patterns = [
-        r"Public\s+([A-Za-z0-9 .,'/-]+?)\s+Talent[’'`]?s location",
-        r"Location\s*[:\-]?\s*([A-Za-z0-9 .,'/-]+)",
-        r"location is verified via browser API\s*[:\-]?\s*([A-Za-z0-9 .,'/-]+)",
-        r"([A-Za-z .'-]+,\s*[A-Za-z .'-]+)",
+        r"Public\s+([A-Za-zÀ-ÿ0-9 .,'/-]+?)\s+Talent.?s location is verified via browser API",
+        r"Location\s*[:\-]?\s*([A-Za-zÀ-ÿ0-9 .,'/-]+)",
+        r"\b([A-Z][A-Za-zÀ-ÿ.'-]+(?:\s+[A-Z][A-Za-zÀ-ÿ.'-]+)*(?:,\s*[A-Z][A-Za-zÀ-ÿ.'-]+(?:\s+[A-Z][A-Za-zÀ-ÿ.'-]+)*)?)\b(?=\s+Talent.?s location is verified via browser API)",
     ]
 
     blocked = {
@@ -1081,14 +986,11 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
         if not m:
             continue
 
-        location = m.group(1).strip(" ,.-")
+        location = _clean_location_candidate(m.group(1))
         if not location:
             continue
         if location in blocked:
             continue
-        if len(location) < 2 or len(location) > 60:
-            continue
-
         return location
 
     return ""
@@ -1256,6 +1158,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print("LOCATION PARSED:", rec.location)
         print("TWITTER HANDLE PARSED:", rec.twitter_handle)
         print("ROLE PARSED:", rec.job_role)
+        print("YEARS PARSED:", rec.years_of_experience)
 
         return rec
 
