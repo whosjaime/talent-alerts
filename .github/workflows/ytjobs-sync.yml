@@ -2,21 +2,24 @@ name: YTJobs Sync
 
 on:
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "*/30 * * * *"   # every 30 minutes
   workflow_dispatch:
     inputs:
       max_pages:
         description: "How many pages to scrape"
         required: false
         default: "100"
+
       dry_run:
         description: "Dry run (scrape only, no monday writes)"
         required: false
         default: "false"
+
       headless:
         description: "Run browser headless"
         required: false
         default: "true"
+
       open_for_work_only:
         description: "Only sync talent explicitly marked open for work"
         required: false
@@ -46,13 +49,10 @@ jobs:
         env:
           MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
 
-          # Optional overrides if you ever want them later:
-          # MONDAY_BOARD_ID: "18406893281"
-          # MONDAY_DEFAULT_GROUP_ID: "topics"
-
           MAX_PAGES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_pages || '100' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
           HEADLESS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.headless || 'true' }}
           OPEN_FOR_WORK_ONLY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.open_for_work_only || 'false' }}
+
         run: |
           python sync_ytjobs_to_monday.py
