@@ -808,46 +808,88 @@ async def _debug_confirmed_info_area(profile_page: Page) -> None:
 
 
 async def _get_confirmed_info_box(profile_page: Page):
+    """
+    Find the full clickable Confirmed info card, not one of the tiny inner icons.
+    """
     label = profile_page.get_by_text("Confirmed info", exact=True).first
     if await label.count() == 0:
         return None
 
     candidates = [
-        label.locator("xpath=following-sibling::div[1]").first,
-        label.locator("xpath=../following-sibling::div[1]").first,
-        label.locator("xpath=ancestor::div[1]/following-sibling::div[1]").first,
+        label.locator("xpath=following-sibling::*[1]").first,
+        label.locator("xpath=../following-sibling::*[1]").first,
+        label.locator("xpath=ancestor::*[self::div or self::section][1]/following-sibling::*[1]").first,
+        label.locator("xpath=following::*[.//*[name()='svg']][1]").first,
     ]
 
-    for row in candidates:
+    best = None
+    best_score = -1
+
+    for candidate in candidates:
         try:
-            if await row.count() == 0:
+            if await candidate.count() == 0:
                 continue
 
-            # first try direct children that contain svg icons
-            children = row.locator("xpath=./div")
+            box = await candidate.bounding_box()
+            if not box:
+                continue
+
+            if box["width"] < 80 or box["height"] < 20:
+                continue
+
+            svg_count = await candidate.locator("svg").count()
+            text = (await candidate.inner_text(timeout=1000)).strip()
+
+            score = 0
+            score += min(svg_count, 10) * 10
+            score += min(int(box["width"]), 400)
+            score += min(int(box["height"]) * 5, 200)
+
+            # Prefer the actual icon row/card under Confirmed info
+            if svg_count >= 3:
+                score += 100
+            if "experience" in text.lower():
+                score -= 200
+
+            if score > best_score:
+                best = candidate
+                best_score = score
+
+            # Also inspect children in case parent is too big and child is the clickable card
+            children = candidate.locator("xpath=.//*")
             child_count = await children.count()
-            for i in range(child_count):
+            for i in range(min(child_count, 25)):
                 child = children.nth(i)
                 try:
-                    svg_count = await child.locator("svg").count()
-                    box = await child.bounding_box()
-                    if svg_count >= 2 and box and box["width"] > 40 and box["height"] > 20:
-                        return child
+                    child_box = await child.bounding_box()
+                    if not child_box:
+                        continue
+                    if child_box["width"] < 80 or child_box["height"] < 20:
+                        continue
+
+                    child_svg_count = await child.locator("svg").count()
+                    if child_svg_count < 3:
+                        continue
+
+                    child_text = (await child.inner_text(timeout=500)).strip()
+                    child_score = 0
+                    child_score += min(child_svg_count, 10) * 10
+                    child_score += min(int(child_box["width"]), 400)
+                    child_score += min(int(child_box["height"]) * 5, 200)
+
+                    if "experience" in child_text.lower():
+                        child_score -= 200
+
+                    if child_score > best_score:
+                        best = child
+                        best_score = child_score
                 except Exception:
                     continue
-
-            # fallback: any descendant div with svg icons
-            clickable = row.locator("div").filter(has=row.locator("svg")).first
-            if await clickable.count() > 0:
-                return clickable
-
-            # last fallback
-            return row
 
         except Exception:
             continue
 
-    return None
+    return best
 
 
 async def _open_confirmed_info_modal(profile_page: Page) -> bool:
@@ -860,73 +902,75 @@ async def _open_confirmed_info_modal(profile_page: Page) -> bool:
 
     try:
         await target.scroll_into_view_if_needed()
-        await profile_page.wait_for_timeout(200)
+        await profile_page.wait_for_timeout(300)
     except Exception:
         pass
 
-    # real click first - no force
+    # Try direct click on the whole card
     try:
-        await target.click(timeout=2000)
-        await profile_page.wait_for_timeout(700)
+        await target.click(timeout=2500)
+        await profile_page.wait_for_timeout(900)
 
         popup_text = await _extract_open_popup_text(profile_page)
         if popup_text:
-            print("Confirmed info popup opened by click on box", flush=True)
+            print("Confirmed info popup opened by click on full card", flush=True)
             return True
 
         dialog_count = await profile_page.locator('[role="dialog"]:visible').count()
         if dialog_count > 0:
-            print("Confirmed info dialog opened by click on box", flush=True)
+            print("Confirmed info dialog opened by click on full card", flush=True)
             return True
     except Exception as e:
         print(f"Click failed on confirmed info box: {e}", flush=True)
 
-    try:
-        await target.hover(timeout=2000)
-        await profile_page.wait_for_timeout(500)
-
-        popup_text = await _extract_open_popup_text(profile_page)
-        if popup_text:
-            print("Confirmed info popup opened by hover on box", flush=True)
-            return True
-    except Exception as e:
-        print(f"Hover failed on confirmed info box: {e}", flush=True)
-
+    # Try clicking center of the card via mouse
     try:
         box = await target.bounding_box()
         if box:
-            await profile_page.mouse.move(
+            await profile_page.mouse.click(
                 box["x"] + box["width"] / 2,
-                box["y"] + box["height"] / 2
+                box["y"] + box["height"] / 2,
             )
-            await profile_page.mouse.down()
-            await profile_page.mouse.up()
-            await profile_page.wait_for_timeout(700)
+            await profile_page.wait_for_timeout(900)
 
             popup_text = await _extract_open_popup_text(profile_page)
             if popup_text:
-                print("Confirmed info popup opened by mouse click on box", flush=True)
+                print("Confirmed info popup opened by mouse center click", flush=True)
                 return True
 
             dialog_count = await profile_page.locator('[role="dialog"]:visible').count()
             if dialog_count > 0:
-                print("Confirmed info dialog opened by mouse click on box", flush=True)
+                print("Confirmed info dialog opened by mouse center click", flush=True)
                 return True
     except Exception as e:
-        print(f"Mouse move failed on confirmed info box: {e}", flush=True)
+        print(f"Mouse center click failed on confirmed info box: {e}", flush=True)
 
+    # Try JS click as fallback
     try:
-        await target.dispatch_event("click")
-        await profile_page.wait_for_timeout(500)
+        await target.evaluate("(el) => el.click()")
+        await profile_page.wait_for_timeout(700)
 
         popup_text = await _extract_open_popup_text(profile_page)
         if popup_text:
-            print("Confirmed info popup opened by JS click on box", flush=True)
+            print("Confirmed info popup opened by JS click", flush=True)
             return True
     except Exception as e:
         print(f"JS event fallback failed on confirmed info box: {e}", flush=True)
 
-    print("Could not open Confirmed info popup from box.", flush=True)
+    # Last fallback: try Enter/Space after focusing
+    try:
+        await target.focus()
+        await profile_page.keyboard.press("Enter")
+        await profile_page.wait_for_timeout(700)
+
+        popup_text = await _extract_open_popup_text(profile_page)
+        if popup_text:
+            print("Confirmed info popup opened by Enter key", flush=True)
+            return True
+    except Exception as e:
+        print(f"Keyboard fallback failed on confirmed info box: {e}", flush=True)
+
+    print("Could not open Confirmed info popup from full box.", flush=True)
     await _debug_confirmed_info_area(profile_page)
     return False
 
@@ -1019,19 +1063,32 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
     flat = re.sub(r"\s+", " ", modal_text).strip()
 
     patterns = [
-        r"Public\s+([A-Za-z .'-]+,\s*[A-Za-z .'-]+)\s+Talent[’'`]?s location is verified via browser API",
-        r"Location\s*[:\-]?\s*([A-Za-z0-9 ,.'/-]+)",
-        r"Public\s+([A-Za-z0-9 .,'/-]+)\s+Talent[’'`]?s location",
-        r"([A-Za-z .'-]+,\s*[A-Za-z .'-]+)\s+Talent[’'`]?s location is verified",
+        r"Public\s+([A-Za-z0-9 .,'/-]+?)\s+Talent[’'`]?s location",
+        r"Location\s*[:\-]?\s*([A-Za-z0-9 .,'/-]+)",
+        r"location is verified via browser API\s*[:\-]?\s*([A-Za-z0-9 .,'/-]+)",
+        r"([A-Za-z .'-]+,\s*[A-Za-z .'-]+)",
     ]
+
+    blocked = {
+        "Confirmed info",
+        "Why is this important",
+        "Public",
+        "Private",
+    }
 
     for pattern in patterns:
         m = re.search(pattern, flat, re.I)
         if not m:
             continue
+
         location = m.group(1).strip(" ,.-")
-        if "Confirmed info" in location or "Why is this important" in location:
+        if not location:
             continue
+        if location in blocked:
+            continue
+        if len(location) < 2 or len(location) > 60:
+            continue
+
         return location
 
     return ""
@@ -1140,6 +1197,7 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
 
         combined_text, html = await _collect_profile_text(profile_page)
         confirmed_modal_text = await _extract_confirmed_info_modal_text(profile_page)
+        print("CONFIRMED MODAL RAW:", repr(confirmed_modal_text))
         full_text = "\n".join([combined_text, html, confirmed_modal_text]).strip()
 
         linkedin, twitter, twitter_handle, youtube = _extract_social_links(full_text)
