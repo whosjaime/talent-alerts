@@ -185,15 +185,6 @@ GENERIC_CREATOR_WORDS = {
     "videos", "likes", "profile", "clients", "timeline", "posts", "see more",
 }
 
-BAD_LOCATION_VALUES = {
-    "Editor", "Creative Director", "Producer", "Strategist",
-    "Thumbnail Designer", "Channel Manager", "Video Editor",
-    "Long-Form Editor", "Short-Form Editor", "Scriptwriter",
-    "Animator", "Other", "Present", "Profile", "Portfolio",
-    "Clients", "Timeline", "Posts", "Links", "Confirmed info",
-    "Experience", "Language skills", "Categories"
-}
-
 
 @dataclass
 class TalentRecord:
@@ -462,10 +453,6 @@ def _extract_niche(text: str) -> str:
         if score:
             keyword_scores[niche] = score
 
-    for niche, _ in sorted(keyword_scores.items(), key=lambda x: x[1]),:
-        pass
-    # fixed below
-
     for niche, _ in sorted(keyword_scores.items(), key=lambda x: x[1], reverse=True):
         if niche in allowed and niche not in found:
             found.append(niche)
@@ -477,25 +464,14 @@ def _extract_years_of_experience(text: str) -> float | None:
     if not text:
         return None
 
-    clean = re.sub(r"\s+", " ", text)
-
     patterns = [
-        r"\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*years(?:\s+of\s+experience)?\b",
-        r"\bexperience\s*[:\-]?\s*(\d{1,2}(?:\.\d+)?)\s*\+?\s*years\b",
-        r"\bover\s+(\d{1,2})\s+years\b",
-        r"\bmore than\s+(\d{1,2})\s+years\b",
+        r"(\d+(?:\.\d+)?)\s*\+?\s*years(?:\s+of\s+experience)?",
+        r"experience\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*\+?\s*years",
     ]
-
     for pattern in patterns:
-        m = re.search(pattern, clean, re.I)
-        if not m:
-            continue
-        years = _extract_num(m.group(1))
-        if years is None:
-            continue
-        if 0 <= years <= 50:
-            return years
-
+        m = re.search(pattern, text, re.I)
+        if m:
+            return _extract_num(m.group(1))
     return None
 
 
@@ -530,21 +506,6 @@ def _looks_like_creator_name(value: str) -> bool:
     return True
 
 
-def _clean_location_candidate(location: str) -> str:
-    location = re.sub(r"\s+", " ", location or "").strip(" ,.-")
-    if not location:
-        return ""
-    if location in BAD_LOCATION_VALUES:
-        return ""
-    if len(location) < 3 or len(location) > 80:
-        return ""
-    if re.search(r"\b(Talent|verified|browser API|Twitter API|verification link)\b", location, re.I):
-        return ""
-    if re.fullmatch(r"[A-Za-z ]*Editor[A-Za-z ]*", location):
-        return ""
-    return location
-
-
 def _extract_location_from_page_text(text: str) -> str:
     if not text:
         return ""
@@ -557,14 +518,29 @@ def _extract_location_from_page_text(text: str) -> str:
         r"\bfrom\s+([A-Z][A-Za-zÀ-ÿ'.-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'.-]+)*(?:,\s*[A-Z][A-Za-zÀ-ÿ'.-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'.-]+)*){0,2})\b",
     ]
 
+    blocked_exact = {
+        "Editor", "Creative Director", "Producer", "Strategist",
+        "Thumbnail Designer", "Channel Manager", "Video Editor",
+        "Long-Form Editor", "Short-Form Editor", "Scriptwriter",
+        "Animator", "Other", "Present", "Profile", "Portfolio",
+        "Clients", "Timeline", "Posts", "Links", "Confirmed info",
+        "Experience", "Language skills", "Categories"
+    }
+
     for pattern in patterns:
         m = re.search(pattern, clean)
         if not m:
             continue
 
-        location = _clean_location_candidate(m.group(1))
-        if location:
-            return location
+        location = m.group(1).strip(" ,.-")
+        if not location:
+            continue
+        if location in blocked_exact:
+            continue
+        if len(location) < 3 or len(location) > 50:
+            continue
+
+        return location
 
     return ""
 
@@ -595,7 +571,6 @@ async def _wait_for_profile_ready(profile_page: Page) -> None:
         profile_page.get_by_text("Portfolio", exact=True).first,
         profile_page.get_by_text("Experience", exact=True).first,
         profile_page.get_by_text("Hire Me", exact=True).first,
-        profile_page.get_by_text("Confirmed info", exact=True).first,
     ]
 
     for locator in anchors:
@@ -737,7 +712,7 @@ async def _extract_open_popup_text(profile_page: Page) -> str:
 async def _debug_confirmed_info_area(profile_page: Page) -> None:
     try:
         body_text = await profile_page.locator("body").inner_text(timeout=2000)
-        print("BODY AFTER CLICK PREVIEW:", repr(body_text[:2500]), flush=True)
+        print("BODY AFTER CLICK PREVIEW:", repr(body_text[:1500]), flush=True)
     except Exception:
         pass
 
@@ -752,14 +727,6 @@ async def _debug_confirmed_info_area(profile_page: Page) -> None:
             '[data-state="open"], [aria-modal="true"], [role="tooltip"], .modal, .popover, [data-testid="gray-popup-section"]'
         ).count()
         print("OPENISH COUNT:", openish_count, flush=True)
-    except Exception:
-        pass
-
-    try:
-        section_text = await profile_page.locator("body").inner_text(timeout=2000)
-        m = re.search(r"Confirmed info(.*?)(Experience|Links|Language skills|Categories|Why is this important\?)", section_text, re.I | re.S)
-        if m:
-            print("CONFIRMED INFO SECTION AFTER CLICK:", repr(m.group(1)[:1500]), flush=True)
     except Exception:
         pass
 
@@ -922,16 +889,15 @@ async def _extract_confirmed_info_modal_text(profile_page: Page) -> str:
             try:
                 txt = (await dialog.inner_text(timeout=1500)).strip()
                 if txt:
-                    print("CONFIRMED INFO MODAL TEXT:", repr(txt[:1000]), flush=True)
+                    print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
                     return txt
             except Exception:
                 pass
 
         txt = await _extract_open_popup_text(profile_page)
         if txt:
-            print("CONFIRMED INFO MODAL TEXT:", repr(txt[:1000]), flush=True)
+            print("CONFIRMED INFO MODAL TEXT:", repr(txt[:700]), flush=True)
             return txt
-
         return ""
     finally:
         await _close_modal_if_open(profile_page)
@@ -986,11 +952,18 @@ def _extract_location_from_confirmed_modal(modal_text: str) -> str:
         if not m:
             continue
 
-        location = _clean_location_candidate(m.group(1))
+        location = m.group(1).strip(" ,.-")
         if not location:
             continue
         if location in blocked:
             continue
+        if len(location) < 3 or len(location) > 80:
+            continue
+        if re.search(r"\b(Talent|verified|browser API|Twitter API|verification link)\b", location, re.I):
+            continue
+        if location == "Editor":
+            continue
+
         return location
 
     return ""
@@ -1158,7 +1131,6 @@ async def _scrape_profile(context, card: dict) -> TalentRecord | None:
         print("LOCATION PARSED:", rec.location)
         print("TWITTER HANDLE PARSED:", rec.twitter_handle)
         print("ROLE PARSED:", rec.job_role)
-        print("YEARS PARSED:", rec.years_of_experience)
 
         return rec
 
